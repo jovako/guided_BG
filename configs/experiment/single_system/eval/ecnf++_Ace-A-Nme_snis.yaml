@@ -17,7 +17,7 @@ defaults:
   - override /model/net: egnn_dynamics_ad2_cat
   - override /data: single_system/Ace-A-Nme
   - override /trainer: gpu
-hf_state_dict_path: single_system/ecnf++_Ace-A-Nme_0.pth
+hf_state_dict_path: single_system/ecnf++_Ace-A-Nme_1.pth
 model:
   net:
     channels: 256

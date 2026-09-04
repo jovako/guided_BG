@@ -4,6 +4,8 @@ import statistics as stats
 from collections import defaultdict
 from collections.abc import Callable
 from typing import Any
+from pathlib import Path
+import matplotlib.pyplot as plt
 
 import torch
 from lightning import Trainer
@@ -43,7 +45,7 @@ def compute_mean_metrics(metrics: dict[str, Any], prefix: str = "val") -> dict[s
     return {k: stats.mean(v) for k, v in mean_dict_list.items()}
 
 
-def make_log_image_fn(trainer: Trainer) -> Callable[[Any, str | None, str], None]:
+def make_log_image_fn(trainer: Trainer, save_dir: str | None = None) -> Callable[[Any, str | None, str], None]:
     """Return a safe image logger function.
 
     Logs only on global rank 0. Returns a no-op if no WandbLogger is present.
@@ -63,7 +65,7 @@ def make_log_image_fn(trainer: Trainer) -> Callable[[Any, str | None, str], None
         if isinstance(lg, WandbLogger):
             wandb_logger = lg
             break
-
+    """
     if wandb_logger is None:
         # pyrefly: ignore [bad-return]
         return lambda img, title=None, title_prefix="": None
@@ -72,6 +74,27 @@ def make_log_image_fn(trainer: Trainer) -> Callable[[Any, str | None, str], None
         full_title = f"{title_prefix}/{title}" if title_prefix and title else (title or title_prefix)
         # pyrefly: ignore [missing-attribute]
         wandb_logger.log_image(full_title, [img])
+    """
+    # fall back to the Lightning run directory if nothing was passed
+    if save_dir is None:
+        save_dir = getattr(trainer, "log_dir", None) or "."
+    plot_dir = Path(save_dir) / "plots"
+    plot_dir.mkdir(parents=True, exist_ok=True)
+
+    def log_image(img: Any, title: str | None = None, title_prefix: str = "") -> None:
+        full_title = f"{title_prefix}/{title}" if title_prefix and title else (title or title_prefix)
+
+        # always write to disk
+        fname = full_title.replace("/", "__") or "figure"
+        try:
+            img.savefig(plot_dir / f"{fname}.png", dpi=150, bbox_inches="tight")
+        except AttributeError:
+            pass  # not a matplotlib Figure
+
+        if wandb_logger is not None:
+            wandb_logger.log_image(full_title, [img])
+
+        plt.close(img)
 
     return log_image
 
