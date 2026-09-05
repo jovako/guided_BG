@@ -35,28 +35,27 @@ class FlowMatchingModule(BaseLightningModule):
         rtol: Relative tolerance for the ODE solver.
         use_guidance: If True, ``generate_proposal`` replaces the adaptive dopri5
             solver with a fixed-step Euler integrator that, at every step, optimizes
-            a control vector to steer the free endpoint estimate toward
-            ``guidance_target`` under ``guidance_observable``. Trajectories only --
-            dlogp is not tracked for the guided process (see ``generate_proposal``).
+            a control vector to minimize ``guidance_cost_fn`` evaluated on the free
+            endpoint estimate. Trajectories only -- dlogp is not tracked for the
+            guided process (see ``generate_proposal``).
         guidance_num_steps: Number of fixed Euler steps used when ``use_guidance``.
         guidance_inner_steps: Number of Adam steps used to optimize the control
             vector at each Euler step.
         guidance_gamma: Weight of the control vector when combined with the state
             (``x_t + guidance_gamma * u_t``).
         guidance_lr: Adam learning rate for the control vector.
-        guidance_w_terminal: Weight on the terminal (observable-matching) cost.
+        guidance_w_terminal: Weight on the terminal cost (``guidance_cost_fn``).
         guidance_w_vf: Weight penalizing the guided velocity ``net(t, x_t + gamma*u_t)``
             for deviating from the unguided velocity ``net(t, x_t)``. 0 disables this
             term (and skips the extra network call it would need).
         guidance_w_control: Weight penalizing the control vector's magnitude
             (``gamma**2 * ||u_t||^2``). 0 disables this term.
-        guidance_observable: Callable mapping predicted endpoint positions
-            ``(batch, atoms, dims)`` to observable features. For periodic
-            quantities (e.g. dihedral angles), return sin/cos features so that
-            Euclidean distance is meaningful, matching the convention used for
-            TICA features elsewhere in this repo -- this is not wrapped internally.
-        guidance_target: Target observable value(s) to match, broadcastable
-            against ``guidance_observable``'s output.
+        guidance_cost_fn: Callable mapping predicted endpoint positions
+            ``(batch, atoms, dims)`` to a per-sample terminal cost ``(batch,)`` to
+            minimize. Fully general -- e.g. a squared distance to a target
+            observable, or an asymmetric penalty like "only penalize negative
+            phi" (see ``transferable_samplers.guidance`` for differentiable
+            observables such as dihedral angles, and cost-shaping helpers).
     """
 
     def __init__(
@@ -81,8 +80,7 @@ class FlowMatchingModule(BaseLightningModule):
         guidance_w_terminal: float = 50.0,
         guidance_w_vf: float = 0.0,
         guidance_w_control: float = 0.0,
-        guidance_observable: Callable[[torch.Tensor], torch.Tensor] | None = None,
-        guidance_target: torch.Tensor | float | None = None,
+        guidance_cost_fn: Callable[[torch.Tensor], torch.Tensor] | None = None,
     ) -> None:
         super().__init__(
             net=net,
@@ -109,11 +107,9 @@ class FlowMatchingModule(BaseLightningModule):
         self.guidance_w_terminal = guidance_w_terminal
         self.guidance_w_vf = guidance_w_vf
         self.guidance_w_control = guidance_w_control
-        self.guidance_observable = guidance_observable
-        self.guidance_target = guidance_target
+        self.guidance_cost_fn = guidance_cost_fn
         if self.use_guidance:
-            assert self.guidance_observable is not None, "guidance_observable must be set when use_guidance=True."
-            assert self.guidance_target is not None, "guidance_target must be set when use_guidance=True."
+            assert self.guidance_cost_fn is not None, "guidance_cost_fn must be set when use_guidance=True."
 
         # set runtime state
         self.nfe = 0
@@ -274,11 +270,10 @@ class FlowMatchingModule(BaseLightningModule):
         return x, dlogp_out.view(-1)
 
     def _guidance_terminal_cost(self, x1_flat: torch.Tensor, batch_size: int, num_atoms: int) -> torch.Tensor:
-        """Per-sample squared error between the predicted and target observable."""
+        """Per-sample terminal cost from the user-supplied ``guidance_cost_fn``."""
         x1 = x1_flat.reshape(batch_size, num_atoms, -1)
         # pyrefly: ignore [not-callable]
-        diff = self.guidance_observable(x1) - self.guidance_target
-        return diff.reshape(batch_size, -1).pow(2).sum(dim=-1)
+        return self.guidance_cost_fn(x1)
 
     def _integrate_guided(
         self,
@@ -290,9 +285,9 @@ class FlowMatchingModule(BaseLightningModule):
 
         Replaces the adaptive dopri5 solver with a fixed-step Euler integrator so a
         control vector can be optimized at every step: it is fit with
-        ``guidance_inner_steps`` of Adam to steer the free endpoint estimate
-        ``x1 = x_t + (1-t)*v(x_t,t)`` toward ``guidance_target`` under
-        ``guidance_observable``, combined additively as ``x_t + guidance_gamma * u_t``.
+        ``guidance_inner_steps`` of Adam to minimize ``guidance_cost_fn`` evaluated
+        on the free endpoint estimate ``x1 = x_t + (1-t)*v(x_t,t)``, where the
+        control vector is combined additively as ``x_t + guidance_gamma * u_t``.
         The Euler update for the step is then taken from that guided state.
 
         Does not track dlogp -- see ``generate_proposal``.
