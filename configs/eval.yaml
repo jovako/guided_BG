@@ -36,4 +36,4 @@ hf_state_dict_path:
 # globally set torch.set_num_threads a good default is 2
 torch_num_threads: 2
 # seed for random number generators in pytorch, numpy and python.random
-seed:
+seed: 42
