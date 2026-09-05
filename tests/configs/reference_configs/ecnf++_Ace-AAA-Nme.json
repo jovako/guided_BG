@@ -161,7 +161,7 @@
     "work_dir": "${hydra:runtime.cwd}"
   },
   "resume_ckpt_path": null,
-  "seed": null,
+  "seed": 42,
   "tags": [
     "dev"
   ],
@@ -181,12 +181,6 @@
     "limit_val_batches": 1,
     "max_epochs": 1000,
     "min_epochs": 1,
-    "num_sanity_val_steps": 0,
-    "plugins": [
-      {
-        "_target_": "lightning.pytorch.plugins.environments.SLURMEnvironment",
-        "auto_requeue": false
-      }
-    ]
+    "num_sanity_val_steps": 0
   }
 }

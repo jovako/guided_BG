@@ -63,6 +63,7 @@
       "evaluator": {
         "_target_": "transferable_samplers.evaluation.evaluator.PeptideEnsembleEvaluator"
       },
+      "output_dir": "${paths.output_dir}",
       "sampler": {
         "_target_": "transferable_samplers.samplers.snis_sampler.SNISSampler",
         "num_samples": 5000
@@ -311,7 +312,7 @@
     "work_dir": "${hydra:runtime.cwd}"
   },
   "resume_ckpt_path": null,
-  "seed": null,
+  "seed": 42,
   "tags": [
     "dev"
   ],
@@ -332,12 +333,6 @@
     "limit_val_batches": 1,
     "max_epochs": 500,
     "min_epochs": 1,
-    "num_sanity_val_steps": 0,
-    "plugins": [
-      {
-        "_target_": "lightning.pytorch.plugins.environments.SLURMEnvironment",
-        "auto_requeue": false
-      }
-    ]
+    "num_sanity_val_steps": 0
   }
 }

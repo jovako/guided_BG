@@ -13,6 +13,7 @@
       "evaluator": {
         "_target_": "transferable_samplers.evaluation.evaluator.PeptideEnsembleEvaluator"
       },
+      "output_dir": "${paths.output_dir}",
       "sampler": {
         "_target_": "transferable_samplers.samplers.smc_sampler.SMCSampler",
         "energy_cutoff_filter": -20.0,
@@ -111,7 +112,7 @@
     "scratch_dir": "${oc.env:SCRATCH_DIR}/transferable-samplers",
     "work_dir": "${hydra:runtime.cwd}"
   },
-  "seed": null,
+  "seed": 42,
   "tags": [
     "dev"
   ],
@@ -132,13 +133,7 @@
     "limit_val_batches": 1,
     "max_epochs": 40,
     "min_epochs": 1,
-    "num_sanity_val_steps": 0,
-    "plugins": [
-      {
-        "_target_": "lightning.pytorch.plugins.environments.SLURMEnvironment",
-        "auto_requeue": false
-      }
-    ]
+    "num_sanity_val_steps": 0
   },
   "val": false
 }
