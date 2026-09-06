@@ -1,34 +1,28 @@
-"""Unguided rejection-sampling baseline for the "positive phi" constraint.
+"""Unguided rejection-sampling baseline for the smiley constraint.
 
-Reference point for judging guided sampling: draw plain (unguided) samples
-from the model's actual proposal distribution (adaptive dopri5, the accurate
-solver -- not the Euler approximation guidance uses), keep only the ones that
-already satisfy phi > 0, and report the mean target energy of that accepted
-subset. If guidance is not distorting the energy landscape beyond what
-selecting for the constraint already implies, its mean-energy for phi > 0
-samples should land close to this number.
+Same idea as rejection_baseline_positive_phi.py, generalized to the smiley
+region: a sample is accepted if its (phi, psi) falls inside the face circle
+and outside every eye/mouth exclusion circle -- i.e. exactly the
+"frac_in_face_circle and not frac_in_eye_or_mouth" success condition used by
+the guided smiley script (plot_guided_euler_ramachandran.py), just applied as
+a hard accept/reject filter on unguided dopri5 samples instead of as a soft
+guidance cost.
 
-A Wasserstein distance (energy-w2 or torus-w2) needs the actual per-sample
-values from *both* sides being compared, not a summary statistic -- so this
-saves the accepted samples' coordinates and energies to a .pt file
-(SAMPLES_PATH). To get the distance to a *guided* run specifically (rather
-than each side's distance to the true trajectory, which is all that's
-computed here), load both sides' saved samples and call
-``energy_wasserstein``/``torus_wasserstein`` with one as `pred` and the other
-as `true` -- but note the guided script doesn't save its raw samples yet
-either, only summary metrics; it needs the same treatment before that
-comparison is possible.
+The smiley region is a small box (phi in PHI_TARGET, psi in PSI_TARGET)
+overlapping only part of the model's natural density, further restricted to a
+circle minus several small holes -- so expect a much lower acceptance rate
+than the positive-phi baseline (that was ~50%; this could be well under 5%).
+MAX_BATCHES is set high accordingly since each batch is cheap regardless of
+how many samples in it are accepted; watch the running acceptance rate printed
+per batch and lower TARGET_ACCEPTED (or raise MAX_BATCHES) if it's too rare.
 
-Chirality convention matches the other scripts in this directory: energy is
-computed on the samples as generated (chirality-corrected phi is only used to
-decide accept/reject, not to alter the reported energy -- a real chirality
-flip changes essentially no bond lengths/angles, and PeptideEnsembleEvaluator
-doesn't recompute energy after fixing chirality either). The saved/plotted
-coordinates ARE chirality-corrected, though, since those matter for
-torus-w2/Ramachandran geometry.
+Same Wasserstein/chirality conventions as rejection_baseline_positive_phi.py:
+accepted samples' coordinates + energies are saved (not just summary stats),
+since torus-w2/energy-w2 against a guided run need the actual per-sample
+values from both sides.
 
 Run with:
-    uv run python tests/guidance/rejection_baseline_positive_phi.py
+    uv run python tests/guidance/rejection_baseline_smiley.py
 """
 
 from __future__ import annotations
@@ -51,14 +45,39 @@ from transferable_samplers.utils.chirality import ChiralitySignChecker
 from transferable_samplers.utils.init_resume_utils import resolve_init
 from transferable_samplers.utils.standardization import destandardize_coords
 
-TARGET_ACCEPTED = 5000
+TARGET_ACCEPTED = 500
 BATCH_SIZE = 512
-MAX_BATCHES = 40  # safety cap in case the acceptance rate is much lower than expected
+MAX_BATCHES = 200  # smiley region is much rarer than positive-phi; batches are cheap so cap generously
 SEED = 42
 SEQUENCE = "Ace-A-Nme"
 OUT_DIR = "tests/guidance/out"
-PREFIX = "rejection_positive_phi"
+PREFIX = "rejection_smiley"
 SAMPLES_PATH = f"{OUT_DIR}/{PREFIX}_samples.pt"
+
+# Same box target and derived smiley geometry as plot_guided_euler_ramachandran.py.
+PHI_TARGET = (-2.0, -1.0)
+PSI_TARGET = (-0.5, 0.5)
+_BOX_CENTER = ((PHI_TARGET[0] + PHI_TARGET[1]) / 2, (PSI_TARGET[0] + PSI_TARGET[1]) / 2)
+_BOX_HALF_EXTENT = min(PHI_TARGET[1] - PHI_TARGET[0], PSI_TARGET[1] - PSI_TARGET[0]) / 2
+_SMILEY_SCALE = 0.9 * _BOX_HALF_EXTENT / 2.2
+_INNER_SCALE = 0.5
+
+FACE_CENTER = _BOX_CENTER
+FACE_RADIUS = 2.2 * _SMILEY_SCALE
+EYE_CENTERS = [
+    (_BOX_CENTER[0] + dx * _INNER_SCALE * _SMILEY_SCALE, _BOX_CENTER[1] + dy * _INNER_SCALE * _SMILEY_SCALE)
+    for dx, dy in [(-1.0, 1.0), (1.0, 1.0)]
+]
+EYE_RADIUS = 0.3 * _SMILEY_SCALE
+MOUTH_PHIS = [-1.2, -0.9, -0.6, -0.3, 0.0, 0.3, 0.6, 0.9, 1.2]
+MOUTH_CENTERS = [
+    (
+        _BOX_CENTER[0] + p * _INNER_SCALE * _SMILEY_SCALE,
+        _BOX_CENTER[1] + (-1.3 + 0.2 * p**2) * _INNER_SCALE * _SMILEY_SCALE,
+    )
+    for p in MOUTH_PHIS
+]
+MOUTH_RADIUS = 0.2 * _SMILEY_SCALE
 
 
 def load_model_and_data():
@@ -80,6 +99,19 @@ def load_model_and_data():
     return model, datamodule, cfg.data.num_atoms
 
 
+def in_smiley_region(phi: torch.Tensor, psi: torch.Tensor) -> torch.Tensor:
+    """True where (phi, psi) is inside the face circle and outside every eye/mouth hole."""
+    dist_to_face = torch.sqrt((phi - FACE_CENTER[0]) ** 2 + (psi - FACE_CENTER[1]) ** 2)
+    accept = dist_to_face <= FACE_RADIUS
+    for cx, cy in EYE_CENTERS:
+        d = torch.sqrt((phi - cx) ** 2 + (psi - cy) ** 2)
+        accept = accept & (d > EYE_RADIUS)
+    for cx, cy in MOUTH_CENTERS:
+        d = torch.sqrt((phi - cx) ** 2 + (psi - cy) ** 2)
+        accept = accept & (d > MOUTH_RADIUS)
+    return accept
+
+
 def main() -> None:
     device = "cuda" if torch.cuda.is_available() else "cpu"
     model, datamodule, num_atoms = load_model_and_data()
@@ -87,12 +119,13 @@ def main() -> None:
 
     eval_ctx = datamodule.prepare_eval(sequence=SEQUENCE, stage="test")
     phi_idx = get_dihedral_atom_indices(eval_ctx.topology, kind="phi")
+    psi_idx = get_dihedral_atom_indices(eval_ctx.topology, kind="psi")
     chirality_checker = ChiralitySignChecker(eval_ctx.topology, eval_ctx.true_data.samples[:1])
 
     torch.manual_seed(SEED)
 
     accepted_energy = []
-    accepted_samples_physical = []  # chirality-corrected, for geometry (plot / torus-w2 / reuse)
+    accepted_samples_physical = []
     total_accepted = 0
     total_drawn = 0
     batch_i = 0
@@ -107,7 +140,8 @@ def main() -> None:
         x_phys_fixed[flip_mask] *= -1
 
         phi = dihedrals(x_phys_fixed, phi_idx).squeeze(-1)
-        accept_mask = phi > 0
+        psi = dihedrals(x_phys_fixed, psi_idx).squeeze(-1)
+        accept_mask = in_smiley_region(phi, psi)
 
         with torch.no_grad():
             e_batch = eval_ctx.target_energy.energy(x)
@@ -119,7 +153,7 @@ def main() -> None:
         batch_i += 1
         print(
             f"batch {batch_i}: drawn={total_drawn} accepted={total_accepted} "
-            f"(this batch: {accept_mask.float().mean():.1%})",
+            f"(this batch: {accept_mask.float().mean():.2%}, running: {total_accepted / total_drawn:.2%})",
             flush=True,
         )
 
@@ -128,24 +162,28 @@ def main() -> None:
     accepted_energy = torch.cat(accepted_energy, dim=0)[:TARGET_ACCEPTED]
     accepted_samples_physical = torch.cat(accepted_samples_physical, dim=0)[:TARGET_ACCEPTED]
 
-    energy_ci = bootstrap_mean_ci(accepted_energy)
     metrics = {
         f"{PREFIX}/num-drawn": total_drawn,
         f"{PREFIX}/num-accepted": len(accepted_energy),
         f"{PREFIX}/acceptance-rate": acceptance_rate,
-        f"{PREFIX}/mean-energy": accepted_energy.mean().item(),
-        f"{PREFIX}/mean-energy-se": energy_ci["se"],
-        f"{PREFIX}/mean-energy-analytic-se": energy_ci["analytic_se"],
-        f"{PREFIX}/mean-energy-ci-low": energy_ci["ci_low"],
-        f"{PREFIX}/mean-energy-ci-high": energy_ci["ci_high"],
-        f"{PREFIX}/median-energy": accepted_energy.median().item(),
     }
-    metrics.update(
-        energy_wasserstein(pred_energy=accepted_energy, true_energy=eval_ctx.true_data.E_target, prefix=PREFIX)
-    )
-    metrics.update(
-        torus_wasserstein(eval_ctx.true_data.samples, accepted_samples_physical, eval_ctx.topology, prefix=PREFIX)
-    )
+    if len(accepted_energy) > 0:
+        metrics[f"{PREFIX}/mean-energy"] = accepted_energy.mean().item()
+        metrics[f"{PREFIX}/median-energy"] = accepted_energy.median().item()
+        if len(accepted_energy) >= 10:
+            energy_ci = bootstrap_mean_ci(accepted_energy)
+            metrics[f"{PREFIX}/mean-energy-se"] = energy_ci["se"]
+            metrics[f"{PREFIX}/mean-energy-analytic-se"] = energy_ci["analytic_se"]
+            metrics[f"{PREFIX}/mean-energy-ci-low"] = energy_ci["ci_low"]
+            metrics[f"{PREFIX}/mean-energy-ci-high"] = energy_ci["ci_high"]
+        else:
+            print(f"Only {len(accepted_energy)} accepted samples -- skipping bootstrap CI (need >= 10).")
+        metrics.update(
+            energy_wasserstein(pred_energy=accepted_energy, true_energy=eval_ctx.true_data.E_target, prefix=PREFIX)
+        )
+        metrics.update(
+            torus_wasserstein(eval_ctx.true_data.samples, accepted_samples_physical, eval_ctx.topology, prefix=PREFIX)
+        )
 
     print()
     print("\n".join(f"{k}: {v:.4f}" if isinstance(v, float) else f"{k}: {v}" for k, v in metrics.items()))
@@ -158,9 +196,10 @@ def main() -> None:
         writer.writerows(metrics.items())
     print(f"\nsaved {csv_path}")
 
-    # Save the raw accepted samples + energies (not just summary metrics) so a
-    # future script can compute a Wasserstein distance directly against a
-    # guided run's samples, instead of only each side's distance to the truth.
+    if len(accepted_energy) == 0:
+        print("No samples accepted -- skipping sample save and plot.")
+        return
+
     torch.save(
         {"samples_physical": accepted_samples_physical, "energy": accepted_energy, "acceptance_rate": acceptance_rate},
         SAMPLES_PATH,
@@ -178,7 +217,7 @@ def main() -> None:
     if len(accepted_energy) < TARGET_ACCEPTED:
         print(
             f"\nWARNING: only accepted {len(accepted_energy)}/{TARGET_ACCEPTED} target samples "
-            f"after {MAX_BATCHES} batches (acceptance rate {acceptance_rate:.1%}). "
+            f"after {MAX_BATCHES} batches (acceptance rate {acceptance_rate:.2%}). "
             "Raise MAX_BATCHES if you need the full target count."
         )
 

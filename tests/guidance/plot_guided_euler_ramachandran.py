@@ -1,23 +1,33 @@
-"""Guidance sanity check: steer alanine dipeptide samples into a phi/psi "smiley" shape.
+"""Guidance sanity check: steer alanine dipeptide samples toward a chosen objective.
 
 Same setup as ``plot_unguided_euler_ramachandran.py`` (fixed-step Euler
 integration, ECNF++ on Ace-A-Nme, no SNIS/importance-weighting), but with
-``use_guidance=True`` and a terminal cost that (1) pulls samples to stay
-within ``FACE_RADIUS`` of ``FACE_CENTER`` (``within_radius_penalty`` -- the
-face outline) and (2) strongly repels them from small circles marking the
-eyes and mouth (``repel_within_radius_penalty``, weighted by
-``EYE_MOUTH_WEIGHT``) -- so density fills the disk everywhere except
-smiley-shaped holes.
+``use_guidance=True``. Set OBJECTIVE below to switch the terminal cost:
+    - "pos_phi": one-sided penalty, zero cost once phi > 0.
+    - "smiley": pulls samples to stay within FACE_RADIUS of FACE_CENTER (the
+      face outline) and strongly repels them from small circles marking the
+      eyes and mouth -- so density fills the disk everywhere except
+      smiley-shaped holes.
 
-Two previous objectives (guide toward positive phi; a single box target) are
-kept commented out in ``guidance_cost_fn`` for easy reuse.
+Besides the usual energy-w2/torus-w2 to the *true* trajectory (expected to
+get worse under guidance -- see note below), this also reports the
+Wasserstein distance to the matching unguided rejection-sampling baseline
+(rejection_baseline_positive_phi.py / rejection_baseline_smiley.py's saved
+.pt of accepted samples+energies) -- i.e. how far the guided distribution is
+from "what the model's own constrained distribution actually looks like".
+That comparison works fine with different sample counts on each side:
+energy_wasserstein/torus_wasserstein build a separate uniform weight vector
+sized to *each* input's own count (see wasserstein_distances.py), so exact
+optimal transport between differently-sized empirical distributions is just
+what they already do -- no matching/subsampling needed.
 
-Note on interpreting energy-w2/torus-w2 here: guidance deliberately biases the
-distribution away from the true (unbiased) equilibrium ensemble toward the
-face disk, so these are expected to get *worse* relative to the unguided
-run -- they're reported as a diagnostic of how far guidance pushes the
-distribution, not as a "is guidance good" score. The metrics that matter for
-guidance itself are frac-in-face-circle and frac-in-eye-or-mouth below.
+Note on interpreting energy-w2/torus-w2 to the *true* trajectory: guidance
+deliberately biases the distribution away from the true (unbiased)
+equilibrium ensemble toward the objective region, so these are expected to
+get *worse* relative to the unguided run -- they're a diagnostic of how far
+guidance pushes the distribution, not a "is guidance good" score. The
+distance to the rejection baseline is the more direct "is guidance good"
+comparison, since both sides already satisfy the same constraint.
 
 Run with:
     uv run python tests/guidance/plot_guided_euler_ramachandran.py
@@ -26,6 +36,7 @@ Run with:
 from __future__ import annotations
 
 import csv
+import inspect
 import os
 
 import hydra
@@ -47,23 +58,33 @@ from transferable_samplers.utils.chirality import ChiralitySignChecker
 from transferable_samplers.utils.init_resume_utils import resolve_init
 from transferable_samplers.utils.standardization import destandardize_coords
 
+OBJECTIVE = "smiley"  # "pos_phi" or "smiley"
+
 NUM_SAMPLES = 64
 BATCH_SIZE = 64
 SEED = 42
 EULER_STEPS = 200
-GUIDANCE_INNER_STEPS = 2
-GUIDANCE_GAMMA = lambda t: 3.0 if t > 0.6 else 2.0 * t  # noqa: E731
-GUIDANCE_LR = 1e-2
-GUIDANCE_W_TERMINAL = 50.0
+GUIDANCE_INNER_STEPS = 1
+GUIDANCE_GAMMA = lambda t: 2.03 if t > 0.153 else 0.34 * t  # noqa: E731
+#GUIDANCE_GAMMA = 1.6
+GUIDANCE_LR = 1.12e-3    # should scale antiproportionally to EULER_STEPS, so 2e-3 for 600 steps is roughly equivalent to 1e-2 for 120 steps in plot_guided_euler_ramachandran.py
+GUIDANCE_W_TERMINAL = 13.2
 GUIDANCE_W_VF = 0.0
-GUIDANCE_W_CONTROL = 0.01
+GUIDANCE_W_CONTROL = 0.000034
 GUIDANCE_INIT_CONTROL = "zero"  # zero at step 0, carried over from the previous step after
+GUIDANCE_OPTIMIZER = "gd"  # "adam" or "sgd" (for the inner-loop guidance optimization)
 SEQUENCE = "Ace-A-Nme"
 OUT_DIR = "tests/guidance/out"
-PREFIX = "guided_smiley"
+PREFIX = f"euler_guided_{OBJECTIVE}"
 
-# Old box-target attempt (one blob at phi in [-2, -1], psi around center),
-# kept for reuse by the commented-out guidance_cost_fn below.
+# Maps OBJECTIVE to the matching unguided rejection-sampling baseline's saved
+# accepted samples+energies (see rejection_baseline_positive_phi.py /
+# rejection_baseline_smiley.py). May not exist yet if that script hasn't run.
+_REJECTION_PREFIX = {"pos_phi": "rejection_positive_phi", "smiley": "rejection_smiley"}[OBJECTIVE]
+REJECTION_SAMPLES_PATH = f"{OUT_DIR}/{_REJECTION_PREFIX}_samples.pt"
+
+# Box target (one blob at phi in [-2, -1], psi around center) that the smiley
+# geometry below is scaled + recentered to fit inside.
 PHI_TARGET = (-2.0, -1.0)
 PSI_TARGET = (-0.5, 0.5)
 
@@ -105,6 +126,47 @@ MOUTH_RADIUS = 0.2 * _SMILEY_SCALE
 EYE_MOUTH_WEIGHT = 5.0
 
 
+def guidance_hyperparams() -> dict:
+    """The actual guidance-algorithm knobs (model.guidance_* settings) -- what's worth
+    seeing at a glance on stdout. Excludes run bookkeeping (sample/batch count, seed)
+    and shape-specification constants (smiley geometry, EYE_MOUTH_WEIGHT isn't a
+    guidance hyperparameter either -- it's part of the cost function's own shape).
+    """
+    try:
+        gamma_repr = inspect.getsource(GUIDANCE_GAMMA).strip()
+    except (OSError, TypeError):
+        gamma_repr = repr(GUIDANCE_GAMMA)
+
+    return {
+        "EULER_STEPS": EULER_STEPS,
+        "GUIDANCE_INNER_STEPS": GUIDANCE_INNER_STEPS,
+        "GUIDANCE_GAMMA": gamma_repr,
+        "GUIDANCE_LR": GUIDANCE_LR,
+        "GUIDANCE_W_TERMINAL": GUIDANCE_W_TERMINAL,
+        "GUIDANCE_W_VF": GUIDANCE_W_VF,
+        "GUIDANCE_W_CONTROL": GUIDANCE_W_CONTROL,
+        "GUIDANCE_INIT_CONTROL": GUIDANCE_INIT_CONTROL,
+    }
+
+
+def describe_hyperparams() -> dict:
+    """Full run record for the saved CSV: guidance hyperparameters plus bookkeeping
+    and (for "smiley") the shape-specification constants."""
+    hparams = {"OBJECTIVE": OBJECTIVE, "NUM_SAMPLES": NUM_SAMPLES, "BATCH_SIZE": BATCH_SIZE, "SEED": SEED}
+    hparams.update(guidance_hyperparams())
+    if OBJECTIVE == "smiley":
+        hparams.update(
+            {
+                "FACE_CENTER": FACE_CENTER,
+                "FACE_RADIUS": FACE_RADIUS,
+                "EYE_RADIUS": EYE_RADIUS,
+                "MOUTH_RADIUS": MOUTH_RADIUS,
+                "EYE_MOUTH_WEIGHT": EYE_MOUTH_WEIGHT,
+            }
+        )
+    return hparams
+
+
 def load_model_and_data():
     GlobalHydra.instance().clear()
     with initialize(version_base="1.3", config_path="../../configs"):
@@ -127,6 +189,12 @@ def load_model_and_data():
 
 
 def main() -> None:
+    hparams = describe_hyperparams()
+    print("=== Guidance hyperparameters ===")
+    for k, v in guidance_hyperparams().items():
+        print(f"{k}: {v}")
+    print("=================================\n")
+
     device = "cuda" if torch.cuda.is_available() else "cpu"
     model, datamodule, num_atoms = load_model_and_data()
     model = model.to(device).eval()
@@ -144,25 +212,19 @@ def main() -> None:
     # in physical units while x1 below is normalized.
     chirality_checker = ChiralitySignChecker(eval_ctx.topology, eval_ctx.true_data.samples[:1])
 
-    """
-    # --- previous objective: guide toward positive phi (kept for reuse) ---
-    def guidance_cost_fn(x1: torch.Tensor) -> torch.Tensor:
-    #     # EGNN is reflection-equivariant: some samples mid-generation are the
-    #     # wrong (mirror-image) enantiomer, for which raw phi has the opposite
-    #     # sign of the true, chirality-corrected phi. Without this correction,
-    #     # guidance would push those samples' phi the wrong way.
-         with torch.no_grad():
-             flip_mask = chirality_checker.flip_mask(x1)
-         sign = torch.where(flip_mask, -1.0, 1.0).to(x1)[:, None, None]
-         phi = dihedrals(x1 * sign, phi_idx)  # (batch, num_phi)
-         return one_sided_quadratic_penalty(phi, threshold=0.0, penalize_below=True).sum(dim=-1)
-
-    """
-    def guidance_cost_fn(x1: torch.Tensor) -> torch.Tensor:
+    def pos_phi_cost_fn(x1: torch.Tensor) -> torch.Tensor:
         # EGNN is reflection-equivariant: some samples mid-generation are the
-        # wrong (mirror-image) enantiomer, for which raw phi/psi have the
-        # opposite sign of the true, chirality-corrected values. Without this
-        # correction, guidance would push those samples the wrong way.
+        # wrong (mirror-image) enantiomer, for which raw phi has the opposite
+        # sign of the true, chirality-corrected phi. Without this correction,
+        # guidance would push those samples' phi the wrong way.
+        with torch.no_grad():
+            flip_mask = chirality_checker.flip_mask(x1)
+        sign = torch.where(flip_mask, -1.0, 1.0).to(x1)[:, None, None]
+        phi = dihedrals(x1 * sign, phi_idx)  # (batch, num_phi)
+        return one_sided_quadratic_penalty(phi, threshold=0.0, penalize_below=True).sum(dim=-1)
+
+    def smiley_cost_fn(x1: torch.Tensor) -> torch.Tensor:
+        # Same chirality correction as pos_phi_cost_fn, applied to both phi and psi.
         with torch.no_grad():
             flip_mask = chirality_checker.flip_mask(x1)
         sign = torch.where(flip_mask, -1.0, 1.0).to(x1)[:, None, None]
@@ -183,6 +245,8 @@ def main() -> None:
             cost = cost + EYE_MOUTH_WEIGHT * repel_within_radius_penalty(dist, MOUTH_RADIUS)
 
         return cost
+
+    guidance_cost_fn = {"pos_phi": pos_phi_cost_fn, "smiley": smiley_cost_fn}[OBJECTIVE]
 
     model.use_guidance = True
     model.guidance_cost_fn = guidance_cost_fn
@@ -257,17 +321,29 @@ def main() -> None:
     metrics.update(energy_wasserstein(pred_energy=e_generated, true_energy=eval_ctx.true_data.E_target, prefix=PREFIX))
     metrics.update(torus_wasserstein(eval_ctx.true_data.samples, samples_physical, eval_ctx.topology, prefix=PREFIX))
 
-    print("\n".join(f"{k}: {v:.4f}" for k, v in metrics.items()))
+    # Distance to the matching unguided rejection-sampling baseline (samples
+    # that already satisfy the same constraint, drawn without guidance) --
+    # the more direct "is guidance good" comparison than either side's
+    # distance to the unconstrained true trajectory above. Works fine with a
+    # different sample count on each side (see module docstring).
+    if os.path.exists(REJECTION_SAMPLES_PATH):
+        rejection_data = torch.load(REJECTION_SAMPLES_PATH, weights_only=False)
+        rejection_samples_physical = rejection_data["samples_physical"]
+        rejection_energy = rejection_data["energy"]
+        metrics.update(
+            energy_wasserstein(
+                pred_energy=e_generated, true_energy=rejection_energy, prefix=f"{PREFIX}-vs-rejection"
+            )
+        )
+        metrics.update(
+            torus_wasserstein(
+                rejection_samples_physical, samples_physical, eval_ctx.topology, prefix=f"{PREFIX}-vs-rejection"
+            )
+        )
+    else:
+        print(f"\nNo rejection baseline found at {REJECTION_SAMPLES_PATH} -- run the matching baseline script first.")
 
-    baseline_csv = f"{OUT_DIR}/euler_unguided_metrics.csv"
-    if os.path.exists(baseline_csv):
-        with open(baseline_csv) as f:
-            baseline = {row["metric"]: float(row["value"]) for row in csv.DictReader(f)}
-        print("\nvs. unguided baseline:")
-        for name in ["mean-energy", "energy-w2", "torus-w2"]:
-            base_key, guided_key = f"euler_unguided/{name}", f"{PREFIX}/{name}"
-            if base_key in baseline and guided_key in metrics:
-                print(f"  {name}: {baseline[base_key]:.4f} -> {metrics[guided_key]:.4f}")
+    print("\n".join(f"{k}: {v:.4f}" for k, v in metrics.items()))
 
     os.makedirs(OUT_DIR, exist_ok=True)
 
@@ -275,6 +351,7 @@ def main() -> None:
     with open(csv_path, "w", newline="") as f:
         writer = csv.writer(f)
         writer.writerow(["metric", "value"])
+        writer.writerows((f"hparam/{k}", v) for k, v in hparams.items())
         writer.writerows(metrics.items())
     print(f"saved {csv_path}")
 
