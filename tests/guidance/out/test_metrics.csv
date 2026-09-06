@@ -1,0 +1,10 @@
+metric,value
+test/mean-energy,-34.640567779541016
+test/correct-chirality-rate,0.5625
+test/frac-in-face-circle,0.0
+test/frac-in-eye-or-mouth,0.0
+test/mean-phi,0.9372509717941284
+test/mean-psi,0.2990923225879669
+test/energy-w2,12.14438886001191
+test/energy-w1,12.057591109068285
+test/torus-w2,2.801657124245276

@@ -1,0 +1,8 @@
+metric,value
+euler_guided_positive_phi/mean-energy,-34.82653045654297
+euler_guided_positive_phi/correct-chirality-rate,0.4599999785423279
+euler_guided_positive_phi/frac-phi-positive,1.0
+euler_guided_positive_phi/mean-phi,0.9519111514091492
+euler_guided_positive_phi/energy-w2,14.021793059204251
+euler_guided_positive_phi/energy-w1,12.621261856230337
+euler_guided_positive_phi/torus-w2,2.811548041230263
