@@ -42,7 +42,9 @@ class FlowMatchingModule(BaseLightningModule):
         guidance_inner_steps: Number of Adam steps used to optimize the control
             vector at each Euler step.
         guidance_gamma: Weight of the control vector when combined with the state
-            (``x_t + guidance_gamma * u_t``).
+            (``x_t + guidance_gamma * u_t``). Either a constant, or a callable
+            of the scalar step time ``t`` (e.g. ``lambda t: 5.0 if t > 0.6 else 2.0 * t``)
+            for a time-dependent schedule, evaluated once per Euler step.
         guidance_lr: Adam learning rate for the control vector.
         guidance_w_terminal: Weight on the terminal cost (``guidance_cost_fn``).
         guidance_w_vf: Weight penalizing the guided velocity ``net(t, x_t + gamma*u_t)``
@@ -50,6 +52,11 @@ class FlowMatchingModule(BaseLightningModule):
             term (and skips the extra network call it would need).
         guidance_w_control: Weight penalizing the control vector's magnitude
             (``gamma**2 * ||u_t||^2``). 0 disables this term.
+        guidance_init_control: How the control vector ``u_t`` is initialized at
+            each Euler step, matching the reference NDTM ``initialize_ut``
+            schemes. ``"zero"`` (default): reset to zero every step. ``"causal_zero"``:
+            zero only at the first step, then carried over from the previous
+            step's optimized value (detached) for every subsequent step.
         guidance_cost_fn: Callable mapping predicted endpoint positions
             ``(batch, atoms, dims)`` to a per-sample terminal cost ``(batch,)`` to
             minimize. Fully general -- e.g. a squared distance to a target
@@ -75,11 +82,12 @@ class FlowMatchingModule(BaseLightningModule):
         use_guidance: bool = False,
         guidance_num_steps: int = 100,
         guidance_inner_steps: int = 2,
-        guidance_gamma: float = 4.0,
+        guidance_gamma: float | Callable[[torch.Tensor], float] = 4.0,
         guidance_lr: float = 1e-2,
         guidance_w_terminal: float = 50.0,
         guidance_w_vf: float = 0.0,
         guidance_w_control: float = 0.0,
+        guidance_init_control: str = "zero",
         guidance_cost_fn: Callable[[torch.Tensor], torch.Tensor] | None = None,
     ) -> None:
         super().__init__(
@@ -107,9 +115,13 @@ class FlowMatchingModule(BaseLightningModule):
         self.guidance_w_terminal = guidance_w_terminal
         self.guidance_w_vf = guidance_w_vf
         self.guidance_w_control = guidance_w_control
+        self.guidance_init_control = guidance_init_control
         self.guidance_cost_fn = guidance_cost_fn
         if self.use_guidance:
             assert self.guidance_cost_fn is not None, "guidance_cost_fn must be set when use_guidance=True."
+        assert self.guidance_init_control in ("zero", "causal_zero"), (
+            f"Unknown guidance_init_control: {self.guidance_init_control!r}"
+        )
 
         # set runtime state
         self.nfe = 0
@@ -314,12 +326,17 @@ class FlowMatchingModule(BaseLightningModule):
 
         xt = x
         nfe = 0
+        u_t_carry = None
         for i in range(self.guidance_num_steps):
             t_i = ts[i]
+            gamma_t = self.guidance_gamma(t_i) if callable(self.guidance_gamma) else self.guidance_gamma
 
             with torch.enable_grad():
                 xt_ = xt.detach()
-                u_t = torch.zeros_like(xt_, requires_grad=True)
+                if self.guidance_init_control == "causal_zero" and i > 0:
+                    u_t = u_t_carry.clone().requires_grad_(True)
+                else:
+                    u_t = torch.zeros_like(xt_, requires_grad=True)
                 optimizer = torch.optim.Adam([u_t], lr=self.guidance_lr)
 
                 vt_unguided = None
@@ -328,7 +345,7 @@ class FlowMatchingModule(BaseLightningModule):
                     nfe += 1
 
                 for _ in range(self.guidance_inner_steps):
-                    cxt = xt_ + self.guidance_gamma * u_t
+                    cxt = xt_ + gamma_t * u_t
                     vt_control = eval_fn(t_i, cxt)
                     x1_pred = cxt + (1.0 - t_i) * vt_control
                     loss = self.guidance_w_terminal * self._guidance_terminal_cost(x1_pred, batch_size, num_atoms)
@@ -338,14 +355,15 @@ class FlowMatchingModule(BaseLightningModule):
                         loss = loss + self.guidance_w_vf * vf_cost
                     if self.guidance_w_control > 0:
                         control_cost = u_t.pow(2).reshape(batch_size, -1).sum(dim=-1)
-                        loss = loss + self.guidance_w_control * (self.guidance_gamma**2) * control_cost
+                        loss = loss + self.guidance_w_control * (gamma_t**2) * control_cost
 
                     optimizer.zero_grad()
                     loss.sum().backward()
                     optimizer.step()
                     nfe += 1
 
-                cxt = xt_ + self.guidance_gamma * u_t.detach()
+                u_t_carry = u_t.detach()
+                cxt = xt_ + gamma_t * u_t_carry
                 vt_control = eval_fn(t_i, cxt)
                 nfe += 1
 
