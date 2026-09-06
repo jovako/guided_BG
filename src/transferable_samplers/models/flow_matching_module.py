@@ -45,7 +45,18 @@ class FlowMatchingModule(BaseLightningModule):
             (``x_t + guidance_gamma * u_t``). Either a constant, or a callable
             of the scalar step time ``t`` (e.g. ``lambda t: 5.0 if t > 0.6 else 2.0 * t``)
             for a time-dependent schedule, evaluated once per Euler step.
-        guidance_lr: Adam learning rate for the control vector.
+        guidance_lr: Learning rate / step size for the control vector optimizer
+            (see ``guidance_optimizer``).
+        guidance_optimizer: How the control vector ``u_t`` is updated at each inner
+            step. ``"adam"`` (default): a fresh ``torch.optim.Adam`` per Euler step.
+            Note bias correction makes Adam's *first* step exactly
+            ``lr * sign(gradient)`` regardless of gradient magnitude (the two
+            ``(1-beta)`` bias-correction factors cancel exactly at t=1), so with
+            the common ``guidance_inner_steps=1`` setting, "Adam" here is really
+            just a fixed-size step in the gradient's sign direction, not a
+            magnitude-aware update. ``"gd"``: plain gradient descent,
+            ``u_t -= lr * gradient`` -- uses the actual gradient magnitude, no
+            optimizer state.
         guidance_w_terminal: Weight on the terminal cost (``guidance_cost_fn``).
         guidance_w_vf: Weight penalizing the guided velocity ``net(t, x_t + gamma*u_t)``
             for deviating from the unguided velocity ``net(t, x_t)``. 0 disables this
@@ -84,6 +95,7 @@ class FlowMatchingModule(BaseLightningModule):
         guidance_inner_steps: int = 2,
         guidance_gamma: float | Callable[[torch.Tensor], float] = 4.0,
         guidance_lr: float = 1e-2,
+        guidance_optimizer: str = "adam",
         guidance_w_terminal: float = 50.0,
         guidance_w_vf: float = 0.0,
         guidance_w_control: float = 0.0,
@@ -112,6 +124,7 @@ class FlowMatchingModule(BaseLightningModule):
         self.guidance_inner_steps = guidance_inner_steps
         self.guidance_gamma = guidance_gamma
         self.guidance_lr = guidance_lr
+        self.guidance_optimizer = guidance_optimizer
         self.guidance_w_terminal = guidance_w_terminal
         self.guidance_w_vf = guidance_w_vf
         self.guidance_w_control = guidance_w_control
@@ -122,6 +135,7 @@ class FlowMatchingModule(BaseLightningModule):
         assert self.guidance_init_control in ("zero", "causal_zero"), (
             f"Unknown guidance_init_control: {self.guidance_init_control!r}"
         )
+        assert self.guidance_optimizer in ("adam", "gd"), f"Unknown guidance_optimizer: {self.guidance_optimizer!r}"
 
         # set runtime state
         self.nfe = 0
@@ -337,7 +351,7 @@ class FlowMatchingModule(BaseLightningModule):
                     u_t = u_t_carry.clone().requires_grad_(True)
                 else:
                     u_t = torch.zeros_like(xt_, requires_grad=True)
-                optimizer = torch.optim.Adam([u_t], lr=self.guidance_lr)
+                optimizer = torch.optim.Adam([u_t], lr=self.guidance_lr) if self.guidance_optimizer == "adam" else None
 
                 vt_unguided = None
                 if self.guidance_w_vf > 0:
@@ -357,9 +371,13 @@ class FlowMatchingModule(BaseLightningModule):
                         control_cost = u_t.pow(2).reshape(batch_size, -1).sum(dim=-1)
                         loss = loss + self.guidance_w_control * (gamma_t**2) * control_cost
 
-                    optimizer.zero_grad()
-                    loss.sum().backward()
-                    optimizer.step()
+                    if optimizer is not None:
+                        optimizer.zero_grad()
+                        loss.sum().backward()
+                        optimizer.step()
+                    else:
+                        (grad,) = torch.autograd.grad(loss.sum(), u_t)
+                        u_t = (u_t - self.guidance_lr * grad).detach().requires_grad_(True)
                     nfe += 1
 
                 u_t_carry = u_t.detach()
