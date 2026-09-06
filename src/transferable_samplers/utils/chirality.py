@@ -96,6 +96,36 @@ def _check_symmetry_change(
     return (perm_sign != reference_signs.to(pred_coords)).any(dim=-1)
 
 
+class ChiralitySignChecker:
+    """Precomputed chirality checker for repeated per-batch checks against a fixed reference.
+
+    ``get_symmetry_change`` rebuilds the bond adjacency list and chirality
+    centers from the ``mdtraj`` topology (a Python-level loop over bonds/atoms)
+    on every call, which is fine for a one-off evaluation pass but too slow to
+    call on every step of a sampling loop (e.g. a guidance cost function
+    called hundreds of times). This does that topology-derived work once at
+    construction time; ``flip_mask`` is then a cheap, tensor-only check.
+    """
+
+    def __init__(self, topology: md.Topology, reference_coords: torch.Tensor) -> None:
+        """Args:
+        topology: Molecular topology (e.g. from MDTraj) providing atoms and bonds.
+        reference_coords: A single correct-chirality reference conformation
+            (or a batch -- only the first frame is used). Chirality is a
+            discrete, per-stereocenter invariant, so any correctly-folded
+            conformation gives the same reference signs.
+        """
+        adj_list = _get_adj_list(topology)
+        atom_types = _get_atom_types(topology)
+        self.chirality_centers = _find_chirality_centers(adj_list, atom_types)
+        self.reference_signs = _compute_chirality_sign(reference_coords[:1], self.chirality_centers)
+
+    def flip_mask(self, coords: torch.Tensor) -> torch.Tensor:
+        """Boolean mask, shape ``(batch,)``, True where ``coords`` need flipping to match the reference."""
+        perm_sign = _compute_chirality_sign(coords, self.chirality_centers)
+        return (perm_sign != self.reference_signs.to(coords)).any(dim=-1)
+
+
 def get_symmetry_change(true_samples: torch.Tensor, pred_samples: torch.Tensor, topology: md.Topology) -> torch.Tensor:
     """Check whether predicted samples have inconsistent global chirality relative to true samples.
 
