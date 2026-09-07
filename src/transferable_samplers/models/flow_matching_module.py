@@ -377,7 +377,9 @@ class FlowMatchingModule(BaseLightningModule):
                         optimizer.step()
                     else:
                         (grad,) = torch.autograd.grad(loss.sum(), u_t)
-                        u_t = (u_t - self.guidance_lr * grad).detach().requires_grad_(True)
+                        grad_norm = grad.norm(dim=-1, keepdim=True)
+                        u_t = (u_t - self.guidance_lr * grad / (grad_norm + 1e-8)).detach().requires_grad_(True)
+                        #u_t = (u_t - self.guidance_lr * grad / (grad.abs() + 1e-8)).detach().requires_grad_(True)
                     nfe += 1
 
                 u_t_carry = u_t.detach()
