@@ -60,17 +60,17 @@ from transferable_samplers.utils.standardization import destandardize_coords
 
 OBJECTIVE = "smiley"  # "pos_phi" or "smiley"
 
-NUM_SAMPLES = 64
-BATCH_SIZE = 64
+NUM_SAMPLES = 1000
+BATCH_SIZE = 256
 SEED = 42
 EULER_STEPS = 200
 GUIDANCE_INNER_STEPS = 1
-GUIDANCE_GAMMA = lambda t: 2.03 if t > 0.153 else 0.34 * t  # noqa: E731
+GUIDANCE_GAMMA = 2.
 #GUIDANCE_GAMMA = 1.6
-GUIDANCE_LR = 1.12e-3    # should scale antiproportionally to EULER_STEPS, so 2e-3 for 600 steps is roughly equivalent to 1e-2 for 120 steps in plot_guided_euler_ramachandran.py
-GUIDANCE_W_TERMINAL = 13.2
+GUIDANCE_LR = 1e-2    # should scale antiproportionally to EULER_STEPS, so 2e-3 for 600 steps is roughly equivalent to 1e-2 for 120 steps in plot_guided_euler_ramachandran.py
+GUIDANCE_W_TERMINAL = 20.
 GUIDANCE_W_VF = 0.0
-GUIDANCE_W_CONTROL = 0.000034
+GUIDANCE_W_CONTROL = 0.0
 GUIDANCE_INIT_CONTROL = "zero"  # zero at step 0, carried over from the previous step after
 GUIDANCE_OPTIMIZER = "gd"  # "adam" or "sgd" (for the inner-loop guidance optimization)
 SEQUENCE = "Ace-A-Nme"
@@ -100,29 +100,35 @@ _SMILEY_SCALE = 0.9 * _BOX_HALF_EXTENT / 2.2  # 2.2 was the original (unscaled) 
 FACE_CENTER = _BOX_CENTER
 FACE_RADIUS = 2.2 * _SMILEY_SCALE
 
-# Eyes/mouth were sitting too close to the face's outer edge -- pull their
-# offsets from FACE_CENTER inward (uniformly shrunk by _INNER_SCALE) before
-# applying the overall smiley scale/recenter, so they land closer to the
-# middle of the face. Radii are left alone -- only positions move.
-_INNER_SCALE = 0.5
+# Offsets from FACE_CENTER, uniformly scaled by _INNER_SCALE before applying
+# the overall smiley scale/recenter -- 1.0 is the original (unscaled) layout;
+# smaller values pull eyes/mouth toward the middle of the face (and shrink
+# the mouth arc's spread/curvature along with them). Radii are left alone --
+# only positions (and the mouth arc's size) move.
+_INNER_SCALE = 0.75  # new (less centered eyes/mouth, bigger mouth arc)
+#_INNER_SCALE = 0.5
 
 EYE_CENTERS = [
     (_BOX_CENTER[0] + dx * _INNER_SCALE * _SMILEY_SCALE, _BOX_CENTER[1] + dy * _INNER_SCALE * _SMILEY_SCALE)
     for dx, dy in [(-1.0, 1.0), (1.0, 1.0)]
 ]
-EYE_RADIUS = 0.3 * _SMILEY_SCALE
+EYE_RADIUS = 0.4 * _SMILEY_SCALE  # new (bigger eyes)
+#EYE_RADIUS = 0.3 * _SMILEY_SCALE
 # A shallow upward-curving arc (a "U") for the mouth, sampled as several
 # small exclusion circles along the curve psi = -1.3 + 0.2 * phi**2
 # (in coordinates relative to FACE_CENTER, before scaling).
-MOUTH_PHIS = [-1.2, -0.9, -0.6, -0.3, 0.0, 0.3, 0.6, 0.9, 1.2]
+MOUTH_PHIS = [-1.5, -1.125, -0.75, -0.375, 0.0, 0.375, 0.75, 1.125, 1.5]  # new (broader smile)
+#MOUTH_PHIS = [-1.2, -0.9, -0.6, -0.3, 0.0, 0.3, 0.6, 0.9, 1.2]
 MOUTH_CENTERS = [
     (
         _BOX_CENTER[0] + p * _INNER_SCALE * _SMILEY_SCALE,
-        _BOX_CENTER[1] + (-1.3 + 0.2 * p**2) * _INNER_SCALE * _SMILEY_SCALE,
+        _BOX_CENTER[1] + (-1.5 + 0.35 * p**2) * _INNER_SCALE * _SMILEY_SCALE,  # new (lower, thicker, more curved)
+        #_BOX_CENTER[1] + (-1.3 + 0.2 * p**2) * _INNER_SCALE * _SMILEY_SCALE,
     )
     for p in MOUTH_PHIS
 ]
-MOUTH_RADIUS = 0.2 * _SMILEY_SCALE
+MOUTH_RADIUS = 0.35 * _SMILEY_SCALE  # new (thicker smile)
+#MOUTH_RADIUS = 0.2 * _SMILEY_SCALE
 EYE_MOUTH_WEIGHT = 5.0
 
 
