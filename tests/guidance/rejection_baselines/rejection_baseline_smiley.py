@@ -22,7 +22,7 @@ since torus-w2/energy-w2 against a guided run need the actual per-sample
 values from both sides.
 
 Run with:
-    uv run python tests/guidance/rejection_baseline_smiley.py
+    uv run python tests/guidance/rejection_baselines/rejection_baseline_smiley.py
 """
 
 from __future__ import annotations
@@ -82,7 +82,7 @@ MOUTH_RADIUS = 0.2 * _SMILEY_SCALE
 
 def load_model_and_data():
     GlobalHydra.instance().clear()
-    with initialize(version_base="1.3", config_path="../../configs"):
+    with initialize(version_base="1.3", config_path="../../../configs"):
         cfg = compose(
             config_name="eval",
             overrides=["experiment=single_system/eval/ecnf++_Ace-A-Nme_snis"],

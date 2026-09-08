@@ -28,7 +28,7 @@ coordinates ARE chirality-corrected, though, since those matter for
 torus-w2/Ramachandran geometry.
 
 Run with:
-    uv run python tests/guidance/rejection_baseline_positive_phi.py
+    uv run python tests/guidance/rejection_baselines/rejection_baseline_positive_phi.py
 """
 
 from __future__ import annotations
@@ -63,7 +63,7 @@ SAMPLES_PATH = f"{OUT_DIR}/{PREFIX}_samples.pt"
 
 def load_model_and_data():
     GlobalHydra.instance().clear()
-    with initialize(version_base="1.3", config_path="../../configs"):
+    with initialize(version_base="1.3", config_path="../../../configs"):
         cfg = compose(
             config_name="eval",
             overrides=["experiment=single_system/eval/ecnf++_Ace-A-Nme_snis"],

@@ -30,7 +30,7 @@ EYE_MOUTH_WEIGHT is fixed at 15.0, matching hparam_search.py and trial 35
 for direct comparability with the original search's results).
 
 Run with:
-    uv run python tests/guidance/hparam_search_smiley_refined.py
+    uv run python tests/guidance/hparam_search/hparam_search_smiley_refined.py
 """
 
 from __future__ import annotations
@@ -122,7 +122,7 @@ FIELDNAMES = [
 
 def load_model_and_data():
     GlobalHydra.instance().clear()
-    with initialize(version_base="1.3", config_path="../../configs"):
+    with initialize(version_base="1.3", config_path="../../../configs"):
         cfg = compose(
             config_name="eval",
             overrides=["experiment=single_system/eval/ecnf++_Ace-A-Nme_snis"],

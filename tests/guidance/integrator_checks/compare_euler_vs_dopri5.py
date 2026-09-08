@@ -12,7 +12,7 @@ number of Euler steps grows, using the trained ECNF++ checkpoint for alanine
 dipeptide (Ace-A-Nme) and a fixed batch of prior samples.
 
 Run with:
-    uv run python scripts/compare_euler_vs_dopri5.py
+    uv run python tests/guidance/integrator_checks/compare_euler_vs_dopri5.py
 """
 
 from __future__ import annotations
@@ -31,7 +31,7 @@ EULER_STEP_COUNTS = [10, 25, 50, 100, 200, 400, 800]
 
 def load_model() -> tuple[torch.nn.Module, int]:
     GlobalHydra.instance().clear()
-    with initialize(version_base="1.3", config_path="../configs"):
+    with initialize(version_base="1.3", config_path="../../../configs"):
         cfg = compose(
             config_name="eval",
             overrides=["experiment=single_system/eval/ecnf++_Ace-A-Nme_snis"],

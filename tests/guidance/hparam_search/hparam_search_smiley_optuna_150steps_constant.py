@@ -1,32 +1,32 @@
-"""Optuna (TPE) hyperparameter search for the smiley guidance objective, at euler_steps=600, with plain GD.
+"""Optuna (TPE) hyperparameter search: 150 Euler steps, 1 inner step, constant gamma.
 
-Same search as hparam_search_smiley_optuna_gd.py (guidance_optimizer="gd";
-inner_steps=1, init_control="zero", EYE_MOUTH_WEIGHT=15.0; minimize the
-Wasserstein distance to the unguided rejection-sampling baseline subject to
-frac_in_face >= FRAC_IN_FACE_TARGET; TPE sampler -- see
-hparam_search_smiley_optuna.py's docstring for why TPE over a GP), but with
-EULER_STEPS=600 instead of 200.
+Same objective as hparam_search_smiley_optuna.py (minimize the Wasserstein
+distance to the unguided rejection-sampling baseline subject to
+frac_in_face >= FRAC_IN_FACE_TARGET), but a smaller, cheaper regime than the
+200/600-step searches:
+    - euler_steps=150
+    - inner_steps=1
+    - gamma is constant in t (no two-piece schedule)
+    - guidance_w_vf=0, guidance_w_control=0 (both terms disabled)
+    - guidance_optimizer="gd" (plain gradient descent, w/ L2-normalized
+      gradient: u_t -= lr * grad / (grad.pow(2).sum() + 1e-8), not Adam)
+Searched: lr, gamma_value, w_terminal.
 
-Deliberately COLD-STARTED, not warm-started from any prior study: two
-independent reasons the associations wouldn't transfer -- (1) lr scales
-roughly inversely with euler_steps (an existing codebase comment: 2e-3 @ 600
-steps ~ 1e-2 @ 120 steps), and (2) lr means something different under GD vs.
-Adam in the first place (Adam's inner_steps=1 step is lr*sign(gradient),
-GD's is lr*gradient -- see hparam_search_smiley_optuna_gd.py's docstring).
-Both effects compound here, so BOUNDS["lr"] is shifted down ~10x from the
-200-step GD version (which was itself ~10x below the 200-step Adam version).
-Seeded with one guess: the 200-step GD search's best trial, lr divided by a
-further 3x for the euler_steps ratio -- see main().
+(The 100-step version of this search -- run before the L2 normalization was
+restored to the gd branch -- found trials qualifying on frac_in_face>=0.98
+only at astronomically bad energy_w2: the phi/psi landed in the smiley
+region but the 3D geometry was otherwise badly distorted, plausibly because
+raw/unnormalized gradient steps aren't capped and can blow up in whichever
+coordinate happens to have a large gradient. lr bounds here are widened
+accordingly, since dividing by the (batch-global) squared-gradient sum
+changes the effective step scale a lot relative to the raw-gradient version.)
 
-Runtime note: 600 steps is 3x the network evaluations per trial of the
-euler_steps=200 search, so expect roughly 1/3 the trial throughput for the
-same BUDGET_SECONDS.
-
-State persists in an Optuna sqlite study (STUDY_PATH), so re-running this
-script resumes automatically -- no hand-rolled CSV resume logic needed.
+No warm start: this regime doesn't match any prior search's fixed settings,
+so this study starts cold. State persists in its own Optuna sqlite study,
+so re-running this script resumes automatically.
 
 Run with:
-    uv run python tests/guidance/hparam_search_smiley_optuna_600steps_gd.py
+    uv run python tests/guidance/hparam_search/hparam_search_smiley_optuna_150steps_constant.py
 """
 
 from __future__ import annotations
@@ -50,41 +50,32 @@ from transferable_samplers.utils.chirality import ChiralitySignChecker
 from transferable_samplers.utils.init_resume_utils import resolve_init
 from transferable_samplers.utils.standardization import destandardize_coords
 
-BUDGET_SECONDS = 8 * 3600
+BUDGET_SECONDS = 2 * 3600
 EVAL_BATCH = 64
 SEED = 42
 FRAC_IN_FACE_TARGET = 0.98
 MIN_FREE_DISK_GB = 2.0
 SEQUENCE = "Ace-A-Nme"
 OUT_DIR = "tests/guidance/out"
-STUDY_NAME = "smiley_gd_600steps"
-STUDY_PATH = f"sqlite:///{OUT_DIR}/hparam_search_smiley_optuna_gd_600steps.db"
-CSV_PATH = f"{OUT_DIR}/hparam_search_smiley_optuna_gd_600steps_results.csv"
-WARM_START_CSV = None  # deliberately cold-started -- see module docstring
+STUDY_NAME = "smiley_150steps_constant_gd_l2norm"
+STUDY_PATH = f"sqlite:///{OUT_DIR}/hparam_search_smiley_optuna_150steps_constant_gd_l2norm.db"
+CSV_PATH = f"{OUT_DIR}/hparam_search_smiley_optuna_150steps_constant_gd_l2norm_results.csv"
 
 # Fixed, not searched.
-EULER_STEPS = 600
+EULER_STEPS = 150
 INNER_STEPS = 1
 INIT_CONTROL = "zero"
-GUIDANCE_OPTIMIZER = "gd"
 EYE_MOUTH_WEIGHT = 15.0
-GAMMA_THRESHOLD_MAX = 0.32  # ceiling
-GAMMA_THRESHOLD_FLOOR = 0.05
+W_VF = 0.0
+W_CONTROL = 0.0
+GUIDANCE_OPTIMIZER = "gd"
 REJECTION_SAMPLES_PATH = f"{OUT_DIR}/rejection_smiley_samples.pt"
 
-# Same non-lr bounds as the Adam searches (cost-function shape, not
-# optimizer-specific). lr shifted down ~10x from hparam_search_smiley_optuna_
-# 600steps.py's Adam bounds, compounding the GD (~10x) and euler_steps (~3x)
-# effects described in the module docstring.
 BOUNDS = {
     "gamma_value": (0.3, 6.0),
-    "gamma_hi": (0.8, 6.0),
-    "gamma_lo_slope": (0.15, 3.0),
-    "lr": (5e-5, 5e-3),
+    "lr": (1e-3, 3.0),
     "w_terminal": (5.0, 200.0),
-    "w_control": (1e-5, 0.02),
 }
-W_VF_CHOICES = [0.0, 0.01, 0.05]
 
 # Same box target + derived smiley geometry as the other guidance scripts.
 PHI_TARGET = (-2.0, -1.0)
@@ -113,15 +104,9 @@ MOUTH_RADIUS = 0.2 * _SMILEY_SCALE
 
 CSV_FIELDNAMES = [
     "optuna_trial_number",
-    "gamma_mode",
     "gamma_value",
-    "gamma_hi",
-    "gamma_lo_slope",
-    "gamma_threshold",
     "lr",
     "w_terminal",
-    "w_vf",
-    "w_control",
     "frac_in_face",
     "frac_in_eye_or_mouth",
     "mean_energy",
@@ -136,7 +121,7 @@ CSV_FIELDNAMES = [
 
 def load_model_and_data():
     GlobalHydra.instance().clear()
-    with initialize(version_base="1.3", config_path="../../configs"):
+    with initialize(version_base="1.3", config_path="../../../configs"):
         cfg = compose(
             config_name="eval",
             overrides=["experiment=single_system/eval/ecnf++_Ace-A-Nme_snis"],
@@ -151,18 +136,6 @@ def load_model_and_data():
     )
     model.load_state_dict(state_dict)
     return model, datamodule, cfg.data.num_atoms
-
-
-def make_gamma(params: dict):
-    if params["gamma_mode"] == "constant":
-        return params["gamma_value"]
-
-    hi, lo_slope, threshold = params["gamma_hi"], params["gamma_lo_slope"], params["gamma_threshold"]
-
-    def gamma_fn(t: torch.Tensor) -> float:
-        return hi if t > threshold else lo_slope * t
-
-    return gamma_fn
 
 
 def make_cost_fn(phi_idx, psi_idx, chirality_checker):
@@ -190,15 +163,6 @@ def make_cost_fn(phi_idx, psi_idx, chirality_checker):
     return guidance_cost_fn
 
 
-def float_distribution(low: float, high: float, log: bool = False):
-    """Optuna 2.x/3.x compatibility: 2.x has no unified FloatDistribution(log=...)."""
-    if hasattr(optuna.distributions, "FloatDistribution"):
-        return optuna.distributions.FloatDistribution(low, high, log=log)
-    if log:
-        return optuna.distributions.LogUniformDistribution(low, high)
-    return optuna.distributions.UniformDistribution(low, high)
-
-
 def objective_value(frac_in_face: float, energy_w2: float, failed: bool) -> float:
     """Penalized, log1p-compressed scalar objective (minimize)."""
     if failed or frac_in_face != frac_in_face:  # NaN check
@@ -215,13 +179,13 @@ def run_trial(model, eval_ctx, phi_idx, psi_idx, chirality_checker, num_atoms, d
     model.guidance_cost_fn = make_cost_fn(phi_idx, psi_idx, chirality_checker)
     model.guidance_num_steps = EULER_STEPS
     model.guidance_inner_steps = INNER_STEPS
-    model.guidance_gamma = make_gamma(params)
+    model.guidance_gamma = params["gamma_value"]
     model.guidance_lr = params["lr"]
-    model.guidance_w_terminal = params["w_terminal"]
-    model.guidance_w_vf = params["w_vf"]
-    model.guidance_w_control = params["w_control"]
-    model.guidance_init_control = INIT_CONTROL
     model.guidance_optimizer = GUIDANCE_OPTIMIZER
+    model.guidance_w_terminal = params["w_terminal"]
+    model.guidance_w_vf = W_VF
+    model.guidance_w_control = W_CONTROL
+    model.guidance_init_control = INIT_CONTROL
 
     torch.manual_seed(SEED)
     z = model.prior.sample(EVAL_BATCH, num_atoms, device=device)
@@ -284,66 +248,6 @@ def run_trial(model, eval_ctx, phi_idx, psi_idx, chirality_checker, num_atoms, d
     return result
 
 
-def load_warm_start_trials() -> list[tuple[dict, dict, float]]:
-    """Load hparam_search_smiley_refined_results.csv as (params, distributions, value) tuples.
-
-    Excludes schedule rows with gamma_threshold > GAMMA_THRESHOLD_MAX + eps --
-    those were recorded before the ceiling-vs-floor bug was fixed and explored
-    a since-abandoned region, not just more data for the current space.
-    """
-    if WARM_START_CSV is None or not Path(WARM_START_CSV).exists():
-        print("No warm-start CSV configured -- starting cold.")
-        return []
-
-    entries = []
-    skipped = 0
-    with open(WARM_START_CSV) as f:
-        for row in csv.DictReader(f):
-            try:
-                mode = row["gamma_mode"]
-                failed = row["failed"] == "True"
-                frac_in_face = float(row["frac_in_face"])
-                energy_w2 = float(row["vs_rejection_energy_w2"])
-
-                if mode == "schedule":
-                    threshold = float(row["gamma_threshold"])
-                    if threshold > GAMMA_THRESHOLD_MAX + 1e-6:
-                        skipped += 1
-                        continue
-                    threshold = min(threshold, GAMMA_THRESHOLD_MAX)  # fold trial-35's tiny float overshoot back in
-                    params = {
-                        "gamma_hi": float(row["gamma_hi"]),
-                        "gamma_lo_slope": float(row["gamma_lo_slope"]),
-                        "gamma_threshold": threshold,
-                    }
-                    distributions = {
-                        "gamma_hi": float_distribution(*BOUNDS["gamma_hi"], log=True),
-                        "gamma_lo_slope": float_distribution(*BOUNDS["gamma_lo_slope"], log=True),
-                        "gamma_threshold": float_distribution(GAMMA_THRESHOLD_FLOOR, GAMMA_THRESHOLD_MAX),
-                    }
-                else:
-                    params = {"gamma_value": float(row["gamma_value"])}
-                    distributions = {"gamma_value": float_distribution(*BOUNDS["gamma_value"], log=True)}
-
-                params["gamma_mode"] = mode
-                distributions["gamma_mode"] = optuna.distributions.CategoricalDistribution(["schedule", "constant"])
-
-                for key in ["lr", "w_terminal", "w_control"]:
-                    params[key] = float(row[key])
-                    distributions[key] = float_distribution(*BOUNDS[key], log=True)
-                params["w_vf"] = float(row["w_vf"])
-                distributions["w_vf"] = optuna.distributions.CategoricalDistribution(W_VF_CHOICES)
-
-                value = objective_value(frac_in_face, energy_w2, failed)
-                entries.append((params, distributions, value))
-            except (KeyError, ValueError) as exc:
-                print(f"Skipping unparseable warm-start row: {exc}")
-                skipped += 1
-
-    print(f"Loaded {len(entries)} warm-start trials from {WARM_START_CSV} ({skipped} skipped).")
-    return entries
-
-
 def main() -> None:
     device = "cuda" if torch.cuda.is_available() else "cpu"
     model, datamodule, num_atoms = load_model_and_data()
@@ -365,32 +269,7 @@ def main() -> None:
         direction="minimize",
         sampler=optuna.samplers.TPESampler(seed=0),
     )
-
-    if len(study.trials) == 0:
-        for params, distributions, value in load_warm_start_trials():
-            study.add_trial(optuna.trial.create_trial(params=params, distributions=distributions, value=value))
-
-        # Not a warm-start import (see module docstring) -- one informed first
-        # guess: the Adam 200-step search's best trial (gamma_hi=2.03,
-        # gamma_lo_slope=0.341, gamma_threshold=0.203, w_terminal=13.2,
-        # w_control=3.4e-05), with lr divided by 10 for GD and by a further 3x
-        # for the euler_steps ratio (200->600). Still gets *evaluated* at 600
-        # steps under GD, not assumed -- just a plausible place to start.
-        study.enqueue_trial(
-            {
-                "gamma_mode": "schedule",
-                "gamma_hi": 2.0302677949703236,
-                "gamma_lo_slope": 0.34118882821876156,
-                "gamma_threshold": 0.20308202926093588,
-                "lr": 0.011186441171591767 / 10 / 3,
-                "w_terminal": 13.249253833502488,
-                "w_vf": 0.0,
-                "w_control": 3.390747222335388e-05,
-            }
-        )
-        print(f"Cold-started study with {len(study.trials)} trials queued (0 warm-started + 1 scaled seed guess).")
-    else:
-        print(f"Resuming existing study with {len(study.trials)} trials already recorded.")
+    print(f"Study has {len(study.trials)} trials already recorded." if study.trials else "Starting cold.")
 
     csv_exists = Path(CSV_PATH).exists()
     csv_file = open(CSV_PATH, "a", newline="")
@@ -408,20 +287,11 @@ def main() -> None:
             study.stop()
             raise optuna.exceptions.TrialPruned()
 
-        gamma_mode = trial.suggest_categorical("gamma_mode", ["schedule", "constant"])
-        if gamma_mode == "constant":
-            params = {"gamma_value": trial.suggest_float("gamma_value", *BOUNDS["gamma_value"], log=True)}
-        else:
-            params = {
-                "gamma_hi": trial.suggest_float("gamma_hi", *BOUNDS["gamma_hi"], log=True),
-                "gamma_lo_slope": trial.suggest_float("gamma_lo_slope", *BOUNDS["gamma_lo_slope"], log=True),
-                "gamma_threshold": trial.suggest_float("gamma_threshold", GAMMA_THRESHOLD_FLOOR, GAMMA_THRESHOLD_MAX),
-            }
-        params["gamma_mode"] = gamma_mode
-        params["lr"] = trial.suggest_float("lr", *BOUNDS["lr"], log=True)
-        params["w_terminal"] = trial.suggest_float("w_terminal", *BOUNDS["w_terminal"], log=True)
-        params["w_vf"] = trial.suggest_categorical("w_vf", W_VF_CHOICES)
-        params["w_control"] = trial.suggest_float("w_control", *BOUNDS["w_control"], log=True)
+        params = {
+            "gamma_value": trial.suggest_float("gamma_value", *BOUNDS["gamma_value"], log=True),
+            "lr": trial.suggest_float("lr", *BOUNDS["lr"], log=True),
+            "w_terminal": trial.suggest_float("w_terminal", *BOUNDS["w_terminal"], log=True),
+        }
 
         result = run_trial(model, eval_ctx, phi_idx, psi_idx, chirality_checker, num_atoms, device, rejection_data, params)
         value = objective_value(result["frac_in_face"], result["vs_rejection_energy_w2"], result["failed"])
@@ -442,8 +312,8 @@ def main() -> None:
             except ValueError:
                 pass
         print(
-            f"[{elapsed_min:6.1f} min] optuna trial {trial.number}: mode={gamma_mode} lr={params['lr']:.4g} "
-            f"w_term={params['w_terminal']:.3g} w_control={params['w_control']:.4g} -> {status}{best_marker}",
+            f"[{elapsed_min:6.1f} min] optuna trial {trial.number}: gamma={params['gamma_value']:.4g} "
+            f"lr={params['lr']:.4g} w_term={params['w_terminal']:.3g} -> {status}{best_marker}",
             flush=True,
         )
         if device == "cuda" and trial.number % 20 == 0:

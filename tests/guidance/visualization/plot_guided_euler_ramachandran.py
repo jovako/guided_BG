@@ -4,6 +4,7 @@ Same setup as ``plot_unguided_euler_ramachandran.py`` (fixed-step Euler
 integration, ECNF++ on Ace-A-Nme, no SNIS/importance-weighting), but with
 ``use_guidance=True``. Set OBJECTIVE below to switch the terminal cost:
     - "pos_phi": one-sided penalty, zero cost once phi > 0.
+    - "phi_target": quadratic penalty, zero cost only exactly at phi=1.
     - "smiley": pulls samples to stay within FACE_RADIUS of FACE_CENTER (the
       face outline) and strongly repels them from small circles marking the
       eyes and mouth -- so density fills the disk everywhere except
@@ -30,7 +31,7 @@ distance to the rejection baseline is the more direct "is guidance good"
 comparison, since both sides already satisfy the same constraint.
 
 Run with:
-    uv run python tests/guidance/plot_guided_euler_ramachandran.py
+    uv run python tests/guidance/visualization/plot_guided_euler_ramachandran.py
 """
 
 from __future__ import annotations
@@ -58,16 +59,16 @@ from transferable_samplers.utils.chirality import ChiralitySignChecker
 from transferable_samplers.utils.init_resume_utils import resolve_init
 from transferable_samplers.utils.standardization import destandardize_coords
 
-OBJECTIVE = "smiley"  # "pos_phi" or "smiley"
+OBJECTIVE = "pos_phi"  # "pos_phi", "phi_target", or "smiley"
 
-NUM_SAMPLES = 1000
-BATCH_SIZE = 256
+NUM_SAMPLES = 256
+BATCH_SIZE = 64
 SEED = 42
 EULER_STEPS = 200
 GUIDANCE_INNER_STEPS = 1
 GUIDANCE_GAMMA = 2.
 #GUIDANCE_GAMMA = 1.6
-GUIDANCE_LR = 1e-2    # should scale antiproportionally to EULER_STEPS, so 2e-3 for 600 steps is roughly equivalent to 1e-2 for 120 steps in plot_guided_euler_ramachandran.py
+GUIDANCE_LR = 1.e-2    # should scale antiproportionally to EULER_STEPS, so 2e-3 for 600 steps is roughly equivalent to 1e-2 for 120 steps in plot_guided_euler_ramachandran.py
 GUIDANCE_W_TERMINAL = 20.
 GUIDANCE_W_VF = 0.0
 GUIDANCE_W_CONTROL = 0.0
@@ -75,12 +76,16 @@ GUIDANCE_INIT_CONTROL = "zero"  # zero at step 0, carried over from the previous
 GUIDANCE_OPTIMIZER = "gd"  # "adam" or "sgd" (for the inner-loop guidance optimization)
 SEQUENCE = "Ace-A-Nme"
 OUT_DIR = "tests/guidance/out"
-PREFIX = f"euler_guided_{OBJECTIVE}"
+PREFIX = f"euler_guided_{EULER_STEPS}_{OBJECTIVE}"
 
 # Maps OBJECTIVE to the matching unguided rejection-sampling baseline's saved
 # accepted samples+energies (see rejection_baseline_positive_phi.py /
 # rejection_baseline_smiley.py). May not exist yet if that script hasn't run.
-_REJECTION_PREFIX = {"pos_phi": "rejection_positive_phi", "smiley": "rejection_smiley"}[OBJECTIVE]
+_REJECTION_PREFIX = {
+    "pos_phi": "rejection_positive_phi",
+    "phi_target": "rejection_phi_target",
+    "smiley": "rejection_smiley",
+}[OBJECTIVE]
 REJECTION_SAMPLES_PATH = f"{OUT_DIR}/{_REJECTION_PREFIX}_samples.pt"
 
 # Box target (one blob at phi in [-2, -1], psi around center) that the smiley
@@ -175,7 +180,7 @@ def describe_hyperparams() -> dict:
 
 def load_model_and_data():
     GlobalHydra.instance().clear()
-    with initialize(version_base="1.3", config_path="../../configs"):
+    with initialize(version_base="1.3", config_path="../../../configs"):
         cfg = compose(
             config_name="eval",
             overrides=["experiment=single_system/eval/ecnf++_Ace-A-Nme_snis"],
@@ -229,6 +234,17 @@ def main() -> None:
         phi = dihedrals(x1 * sign, phi_idx)  # (batch, num_phi)
         return one_sided_quadratic_penalty(phi, threshold=0.0, penalize_below=True).sum(dim=-1)
 
+    def phi_target_cost_fn(x1: torch.Tensor) -> torch.Tensor:
+        # Same chirality correction as pos_phi_cost_fn. Zero only at phi=1,
+        # quadratic penalty growing on both sides -- box_quadratic_penalty with
+        # low=high=1.0 collapses to exactly (phi-1)**2, since only one of its
+        # two relu terms is ever nonzero for a given phi.
+        with torch.no_grad():
+            flip_mask = chirality_checker.flip_mask(x1)
+        sign = torch.where(flip_mask, -1.0, 1.0).to(x1)[:, None, None]
+        phi = dihedrals(x1 * sign, phi_idx)  # (batch, num_phi)
+        return box_quadratic_penalty(phi, low=1.0, high=1.0).sum(dim=-1)
+
     def smiley_cost_fn(x1: torch.Tensor) -> torch.Tensor:
         # Same chirality correction as pos_phi_cost_fn, applied to both phi and psi.
         with torch.no_grad():
@@ -252,7 +268,11 @@ def main() -> None:
 
         return cost
 
-    guidance_cost_fn = {"pos_phi": pos_phi_cost_fn, "smiley": smiley_cost_fn}[OBJECTIVE]
+    guidance_cost_fn = {
+        "pos_phi": pos_phi_cost_fn,
+        "phi_target": phi_target_cost_fn,
+        "smiley": smiley_cost_fn,
+    }[OBJECTIVE]
 
     model.use_guidance = True
     model.guidance_cost_fn = guidance_cost_fn
@@ -360,6 +380,22 @@ def main() -> None:
         writer.writerows((f"hparam/{k}", v) for k, v in hparams.items())
         writer.writerows(metrics.items())
     print(f"saved {csv_path}")
+
+    samples_path = f"{OUT_DIR}/{PREFIX}_samples.pt"
+    torch.save(
+        {
+            "samples": samples,  # normalized space, pre-chirality-fix
+            "samples_physical": samples_physical,
+            "energy": e_generated,
+            "phi": phi_generated,
+            "psi": psi_generated,
+            "flip_mask": flip_mask,
+            "hparams": hparams,
+        },
+        samples_path,
+    )
+    print(f"saved {samples_path}")
+
 
 if __name__ == "__main__":
     main()

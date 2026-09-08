@@ -16,7 +16,7 @@ Reports:
     - a Ramachandran plot
 
 Run with:
-    uv run python scripts/plot_unguided_euler_ramachandran.py
+    uv run python tests/guidance/visualization/plot_unguided_euler_ramachandran.py
 """
 
 from __future__ import annotations
@@ -47,7 +47,7 @@ PREFIX = "euler_unguided"
 
 def load_model_and_data():
     GlobalHydra.instance().clear()
-    with initialize(version_base="1.3", config_path="../../configs"):
+    with initialize(version_base="1.3", config_path="../../../configs"):
         cfg = compose(
             config_name="eval",
             overrides=["experiment=single_system/eval/ecnf++_Ace-A-Nme_snis"],

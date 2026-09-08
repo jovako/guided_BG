@@ -1,45 +1,28 @@
-"""Optuna (TPE) hyperparameter search for the smiley guidance objective.
+"""Optuna (TPE) hyperparameter search: 100 Euler steps, 1 inner step, constant gamma.
 
-Same fixed settings and objective as hparam_search_smiley_refined.py
-(euler_steps=200, inner_steps=1, init_control="zero", EYE_MOUTH_WEIGHT=15.0;
-minimize the Wasserstein distance to the unguided rejection-sampling
-baseline subject to frac_in_face >= FRAC_IN_FACE_TARGET), but replaces the
-hand-rolled "jitter around the current best" local search with a real
-Bayesian-optimization sampler.
+Same objective as hparam_search_smiley_optuna.py (minimize the Wasserstein
+distance to the unguided rejection-sampling baseline subject to
+frac_in_face >= FRAC_IN_FACE_TARGET), but a smaller, cheaper regime:
+    - euler_steps=100 (vs 200/600 in the other searches)
+    - inner_steps=1
+    - gamma is constant in t (no two-piece schedule)
+    - guidance_w_vf=0, guidance_w_control=0 (both terms disabled)
+    - guidance_optimizer="gd" (plain gradient descent w/ elementwise
+      abs-normalized gradient: u_t -= lr * grad / (grad.abs() + 1e-8), i.e.
+      each coordinate moves by roughly lr * sign(grad) -- close to Adam's
+      own bias-corrected first-step behavior, which is presumably why the
+      user found this gd variant does similarly well or better than Adam
+      directly at Adam's best hyperparameters; not Adam)
+Searched: lr, gamma_value, w_terminal -- seeded from and centered on the
+best trial found by the earlier mixed adam/gd 100-step search (adam,
+gamma_value=1.953, lr=0.01995, w_terminal=31.1, frac_in_face=1.000,
+energy_w2=7.531), since gd here is expected to behave similarly.
 
-Sampler choice: Optuna's default TPE (Tree-structured Parzen Estimator), not
-a Gaussian process. The landscape here is sharply non-smooth -- small
-parameter changes have been observed to swing energy-w2 by 2-3 orders of
-magnitude (e.g. trial 1 vs trial 0 in the first refined-search run, same
-lr/w_terminal/w_control, only gamma_mode changed: 18.77 -> 10565). A GP's
-kernel assumes smoothness the objective doesn't have; TPE instead models the
-parameter *distributions* of good vs. bad trials non-parametrically, which
-tends to be more robust to this kind of needle-in-a-haystack surface. (Optuna
-does have a GP-backed sampler too -- optuna.integration.SkoptSampler,
-wrapping scikit-optimize's gp_minimize -- if you want to compare.)
-
-The constraint (frac_in_face >= target) is handled by penalizing the
-objective rather than Optuna's native multi-objective/constraint machinery,
-to keep this a simple, robust single-objective TPE search:
-    objective = log1p(energy_w2)                              if qualifying
-    objective = log1p(1e5 + violation * 1e6)                  if ran but frac_in_face < target
-    objective = log1p(1e7)                                     if the trial crashed
-The log1p keeps the wildly-varying raw values (0.1 to >1e9 observed) in a
-sane range for TPE's internal density estimation.
-
-Warm start: every valid trial from hparam_search_smiley_refined_results.csv
-(158 already-spent GPU/OpenMM evaluations) is imported as a completed Optuna
-trial before any new evaluation runs, via optuna.trial.create_trial --
-excluding the ~46 rows recorded before the gamma_threshold ceiling bug was
-fixed (threshold > 0.32 was, at the time, the wrong regime being explored
-under a since-corrected constraint, so those are a different search space,
-not just more data for this one).
-
-State persists in an Optuna sqlite study (STUDY_PATH), so re-running this
-script resumes automatically -- no hand-rolled CSV resume logic needed.
+State persists in its own Optuna sqlite study, so re-running this script
+resumes automatically.
 
 Run with:
-    uv run python tests/guidance/hparam_search_smiley_optuna.py
+    uv run python tests/guidance/hparam_search/hparam_search_smiley_optuna_100steps_constant.py
 """
 
 from __future__ import annotations
@@ -70,34 +53,32 @@ FRAC_IN_FACE_TARGET = 0.98
 MIN_FREE_DISK_GB = 2.0
 SEQUENCE = "Ace-A-Nme"
 OUT_DIR = "tests/guidance/out"
-STUDY_NAME = "smiley_refined"
-STUDY_PATH = f"sqlite:///{OUT_DIR}/hparam_search_smiley_optuna.db"
-CSV_PATH = f"{OUT_DIR}/hparam_search_smiley_optuna_results.csv"
-WARM_START_CSV = f"{OUT_DIR}/hparam_search_smiley_refined_results.csv"
+STUDY_NAME = "smiley_100steps_constant_gd_absnorm"
+STUDY_PATH = f"sqlite:///{OUT_DIR}/hparam_search_smiley_optuna_100steps_constant_gd_absnorm.db"
+CSV_PATH = f"{OUT_DIR}/hparam_search_smiley_optuna_100steps_constant_gd_absnorm_results.csv"
 
-# Fixed, not searched (same as hparam_search_smiley_refined.py).
-EULER_STEPS = 200
+# Best trial found by the earlier mixed adam/gd 100-step search (trial 31,
+# adam): gamma_value=1.953, lr=0.01995, w_terminal=31.1, frac_in_face=1.000,
+# energy_w2=7.531. The user confirmed the current gd implementation
+# (elementwise abs-normalized gradient) does similarly or better than Adam
+# directly at these values, so it's seeded here verbatim (lr included).
+ADAM_SEED_PARAMS = {"gamma_value": 1.953, "lr": 0.01995, "w_terminal": 31.1}
+
+# Fixed, not searched.
+EULER_STEPS = 100
 INNER_STEPS = 1
 INIT_CONTROL = "zero"
 EYE_MOUTH_WEIGHT = 15.0
-GAMMA_THRESHOLD_MAX = 0.32  # ceiling
-GAMMA_THRESHOLD_FLOOR = 0.05
+W_VF = 0.0
+W_CONTROL = 0.0
+GUIDANCE_OPTIMIZER = "gd"
 REJECTION_SAMPLES_PATH = f"{OUT_DIR}/rejection_smiley_samples.pt"
 
-# Search space bounds -- checked against hparam_search_smiley_refined_results.csv's
-# actual explored ranges (gamma_hi [1.03,4.75], gamma_lo_slope [0.21,1.99],
-# gamma_threshold [0.08,0.32] once the >0.32 rows are excluded, gamma_value
-# [0.65,4.82], lr [0.0035,0.027], w_terminal [10,84], w_control [0.0001,0.017])
-# with margin for the search to move beyond what's already been tried.
 BOUNDS = {
     "gamma_value": (0.3, 6.0),
-    "gamma_hi": (0.8, 6.0),
-    "gamma_lo_slope": (0.15, 3.0),
-    "lr": (1e-3, 0.05),
+    "lr": (0.004, 0.1),  # centered around the adam-best 0.01995
     "w_terminal": (5.0, 200.0),
-    "w_control": (1e-5, 0.02),
 }
-W_VF_CHOICES = [0.0, 0.01, 0.05]
 
 # Same box target + derived smiley geometry as the other guidance scripts.
 PHI_TARGET = (-2.0, -1.0)
@@ -126,15 +107,9 @@ MOUTH_RADIUS = 0.2 * _SMILEY_SCALE
 
 CSV_FIELDNAMES = [
     "optuna_trial_number",
-    "gamma_mode",
     "gamma_value",
-    "gamma_hi",
-    "gamma_lo_slope",
-    "gamma_threshold",
     "lr",
     "w_terminal",
-    "w_vf",
-    "w_control",
     "frac_in_face",
     "frac_in_eye_or_mouth",
     "mean_energy",
@@ -149,7 +124,7 @@ CSV_FIELDNAMES = [
 
 def load_model_and_data():
     GlobalHydra.instance().clear()
-    with initialize(version_base="1.3", config_path="../../configs"):
+    with initialize(version_base="1.3", config_path="../../../configs"):
         cfg = compose(
             config_name="eval",
             overrides=["experiment=single_system/eval/ecnf++_Ace-A-Nme_snis"],
@@ -164,18 +139,6 @@ def load_model_and_data():
     )
     model.load_state_dict(state_dict)
     return model, datamodule, cfg.data.num_atoms
-
-
-def make_gamma(params: dict):
-    if params["gamma_mode"] == "constant":
-        return params["gamma_value"]
-
-    hi, lo_slope, threshold = params["gamma_hi"], params["gamma_lo_slope"], params["gamma_threshold"]
-
-    def gamma_fn(t: torch.Tensor) -> float:
-        return hi if t > threshold else lo_slope * t
-
-    return gamma_fn
 
 
 def make_cost_fn(phi_idx, psi_idx, chirality_checker):
@@ -203,15 +166,6 @@ def make_cost_fn(phi_idx, psi_idx, chirality_checker):
     return guidance_cost_fn
 
 
-def float_distribution(low: float, high: float, log: bool = False):
-    """Optuna 2.x/3.x compatibility: 2.x has no unified FloatDistribution(log=...)."""
-    if hasattr(optuna.distributions, "FloatDistribution"):
-        return optuna.distributions.FloatDistribution(low, high, log=log)
-    if log:
-        return optuna.distributions.LogUniformDistribution(low, high)
-    return optuna.distributions.UniformDistribution(low, high)
-
-
 def objective_value(frac_in_face: float, energy_w2: float, failed: bool) -> float:
     """Penalized, log1p-compressed scalar objective (minimize)."""
     if failed or frac_in_face != frac_in_face:  # NaN check
@@ -228,11 +182,12 @@ def run_trial(model, eval_ctx, phi_idx, psi_idx, chirality_checker, num_atoms, d
     model.guidance_cost_fn = make_cost_fn(phi_idx, psi_idx, chirality_checker)
     model.guidance_num_steps = EULER_STEPS
     model.guidance_inner_steps = INNER_STEPS
-    model.guidance_gamma = make_gamma(params)
+    model.guidance_gamma = params["gamma_value"]
     model.guidance_lr = params["lr"]
+    model.guidance_optimizer = GUIDANCE_OPTIMIZER
     model.guidance_w_terminal = params["w_terminal"]
-    model.guidance_w_vf = params["w_vf"]
-    model.guidance_w_control = params["w_control"]
+    model.guidance_w_vf = W_VF
+    model.guidance_w_control = W_CONTROL
     model.guidance_init_control = INIT_CONTROL
 
     torch.manual_seed(SEED)
@@ -296,66 +251,6 @@ def run_trial(model, eval_ctx, phi_idx, psi_idx, chirality_checker, num_atoms, d
     return result
 
 
-def load_warm_start_trials() -> list[tuple[dict, dict, float]]:
-    """Load hparam_search_smiley_refined_results.csv as (params, distributions, value) tuples.
-
-    Excludes schedule rows with gamma_threshold > GAMMA_THRESHOLD_MAX + eps --
-    those were recorded before the ceiling-vs-floor bug was fixed and explored
-    a since-abandoned region, not just more data for the current space.
-    """
-    if not Path(WARM_START_CSV).exists():
-        print(f"No warm-start CSV found at {WARM_START_CSV}, starting cold.")
-        return []
-
-    entries = []
-    skipped = 0
-    with open(WARM_START_CSV) as f:
-        for row in csv.DictReader(f):
-            try:
-                mode = row["gamma_mode"]
-                failed = row["failed"] == "True"
-                frac_in_face = float(row["frac_in_face"])
-                energy_w2 = float(row["vs_rejection_energy_w2"])
-
-                if mode == "schedule":
-                    threshold = float(row["gamma_threshold"])
-                    if threshold > GAMMA_THRESHOLD_MAX + 1e-6:
-                        skipped += 1
-                        continue
-                    threshold = min(threshold, GAMMA_THRESHOLD_MAX)  # fold trial-35's tiny float overshoot back in
-                    params = {
-                        "gamma_hi": float(row["gamma_hi"]),
-                        "gamma_lo_slope": float(row["gamma_lo_slope"]),
-                        "gamma_threshold": threshold,
-                    }
-                    distributions = {
-                        "gamma_hi": float_distribution(*BOUNDS["gamma_hi"], log=True),
-                        "gamma_lo_slope": float_distribution(*BOUNDS["gamma_lo_slope"], log=True),
-                        "gamma_threshold": float_distribution(GAMMA_THRESHOLD_FLOOR, GAMMA_THRESHOLD_MAX),
-                    }
-                else:
-                    params = {"gamma_value": float(row["gamma_value"])}
-                    distributions = {"gamma_value": float_distribution(*BOUNDS["gamma_value"], log=True)}
-
-                params["gamma_mode"] = mode
-                distributions["gamma_mode"] = optuna.distributions.CategoricalDistribution(["schedule", "constant"])
-
-                for key in ["lr", "w_terminal", "w_control"]:
-                    params[key] = float(row[key])
-                    distributions[key] = float_distribution(*BOUNDS[key], log=True)
-                params["w_vf"] = float(row["w_vf"])
-                distributions["w_vf"] = optuna.distributions.CategoricalDistribution(W_VF_CHOICES)
-
-                value = objective_value(frac_in_face, energy_w2, failed)
-                entries.append((params, distributions, value))
-            except (KeyError, ValueError) as exc:
-                print(f"Skipping unparseable warm-start row: {exc}")
-                skipped += 1
-
-    print(f"Loaded {len(entries)} warm-start trials from {WARM_START_CSV} ({skipped} skipped).")
-    return entries
-
-
 def main() -> None:
     device = "cuda" if torch.cuda.is_available() else "cpu"
     model, datamodule, num_atoms = load_model_and_data()
@@ -377,13 +272,11 @@ def main() -> None:
         direction="minimize",
         sampler=optuna.samplers.TPESampler(seed=0),
     )
-
     if len(study.trials) == 0:
-        for params, distributions, value in load_warm_start_trials():
-            study.add_trial(optuna.trial.create_trial(params=params, distributions=distributions, value=value))
-        print(f"Warm-started study with {len(study.trials)} historical trials.")
+        study.enqueue_trial(ADAM_SEED_PARAMS)
+        print(f"Starting cold, seeded with adam's best trial: {ADAM_SEED_PARAMS}")
     else:
-        print(f"Resuming existing study with {len(study.trials)} trials already recorded.")
+        print(f"Study has {len(study.trials)} trials already recorded.")
 
     csv_exists = Path(CSV_PATH).exists()
     csv_file = open(CSV_PATH, "a", newline="")
@@ -401,20 +294,11 @@ def main() -> None:
             study.stop()
             raise optuna.exceptions.TrialPruned()
 
-        gamma_mode = trial.suggest_categorical("gamma_mode", ["schedule", "constant"])
-        if gamma_mode == "constant":
-            params = {"gamma_value": trial.suggest_float("gamma_value", *BOUNDS["gamma_value"], log=True)}
-        else:
-            params = {
-                "gamma_hi": trial.suggest_float("gamma_hi", *BOUNDS["gamma_hi"], log=True),
-                "gamma_lo_slope": trial.suggest_float("gamma_lo_slope", *BOUNDS["gamma_lo_slope"], log=True),
-                "gamma_threshold": trial.suggest_float("gamma_threshold", GAMMA_THRESHOLD_FLOOR, GAMMA_THRESHOLD_MAX),
-            }
-        params["gamma_mode"] = gamma_mode
-        params["lr"] = trial.suggest_float("lr", *BOUNDS["lr"], log=True)
-        params["w_terminal"] = trial.suggest_float("w_terminal", *BOUNDS["w_terminal"], log=True)
-        params["w_vf"] = trial.suggest_categorical("w_vf", W_VF_CHOICES)
-        params["w_control"] = trial.suggest_float("w_control", *BOUNDS["w_control"], log=True)
+        params = {
+            "gamma_value": trial.suggest_float("gamma_value", *BOUNDS["gamma_value"], log=True),
+            "lr": trial.suggest_float("lr", *BOUNDS["lr"], log=True),
+            "w_terminal": trial.suggest_float("w_terminal", *BOUNDS["w_terminal"], log=True),
+        }
 
         result = run_trial(model, eval_ctx, phi_idx, psi_idx, chirality_checker, num_atoms, device, rejection_data, params)
         value = objective_value(result["frac_in_face"], result["vs_rejection_energy_w2"], result["failed"])
@@ -435,8 +319,8 @@ def main() -> None:
             except ValueError:
                 pass
         print(
-            f"[{elapsed_min:6.1f} min] optuna trial {trial.number}: mode={gamma_mode} lr={params['lr']:.4g} "
-            f"w_term={params['w_terminal']:.3g} w_control={params['w_control']:.4g} -> {status}{best_marker}",
+            f"[{elapsed_min:6.1f} min] optuna trial {trial.number}: gamma={params['gamma_value']:.4g} "
+            f"lr={params['lr']:.4g} w_term={params['w_terminal']:.3g} -> {status}{best_marker}",
             flush=True,
         )
         if device == "cuda" and trial.number % 20 == 0:

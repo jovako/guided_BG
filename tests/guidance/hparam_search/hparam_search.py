@@ -24,7 +24,7 @@ to avoid using meaningful disk space during a long unattended run. Free disk
 space on ``/`` is checked periodically as a safety net.
 
 Run with:
-    uv run python tests/guidance/hparam_search.py
+    uv run python tests/guidance/hparam_search/hparam_search.py
 """
 
 from __future__ import annotations
@@ -114,7 +114,7 @@ FIELDNAMES = [
 
 def load_model_and_data():
     GlobalHydra.instance().clear()
-    with initialize(version_base="1.3", config_path="../../configs"):
+    with initialize(version_base="1.3", config_path="../../../configs"):
         cfg = compose(
             config_name="eval",
             overrides=["experiment=single_system/eval/ecnf++_Ace-A-Nme_snis"],

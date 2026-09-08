@@ -24,7 +24,7 @@ State persists in an Optuna sqlite study (STUDY_PATH), so re-running this
 script resumes automatically -- no hand-rolled CSV resume logic needed.
 
 Run with:
-    uv run python tests/guidance/hparam_search_smiley_optuna_gd.py
+    uv run python tests/guidance/hparam_search/hparam_search_smiley_optuna_gd.py
 """
 
 from __future__ import annotations
@@ -134,7 +134,7 @@ CSV_FIELDNAMES = [
 
 def load_model_and_data():
     GlobalHydra.instance().clear()
-    with initialize(version_base="1.3", config_path="../../configs"):
+    with initialize(version_base="1.3", config_path="../../../configs"):
         cfg = compose(
             config_name="eval",
             overrides=["experiment=single_system/eval/ecnf++_Ace-A-Nme_snis"],
