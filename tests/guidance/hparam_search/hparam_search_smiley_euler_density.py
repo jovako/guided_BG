@@ -20,9 +20,10 @@ frac_in_face >= FRAC_IN_FACE_TARGET), but using
       still routed through a plain ``x + dt*F(t,x)`` step, silently
       discarding the teleport. See make_guided_euler_step's docstring in
       euler_density_integrator.py for the full account.
-    - n_steps=200 (density-check validated: matches dopri5 within ~2% by
-      n=800, but 200 is what the guided smoke test used and is already
-      reasonably converged for sampling-only purposes)
+    - n_steps=250 (the minimum step count found orientation-safe this
+      session: n=200/225 had a nontrivial fraction of samples go
+      non-orientation-preserving near t=1 (28%/9% at batch=64), n=250/300
+      had zero failures)
 Searched: gamma, alpha (inner step length), w_terminal.
 
 Once a good trial is found, re-run it with track_density=True (the default)
@@ -61,20 +62,17 @@ FRAC_IN_FACE_TARGET = 0.98
 MIN_FREE_DISK_GB = 2.0
 SEQUENCE = "Ace-A-Nme"
 OUT_DIR = "tests/guidance/out"
-STUDY_NAME = "smiley_euler_density_v2"
-STUDY_PATH = f"sqlite:///{OUT_DIR}/hparam_search_smiley_euler_density_v2.db"
-CSV_PATH = f"{OUT_DIR}/hparam_search_smiley_euler_density_v2_results.csv"
+STUDY_NAME = "smiley_euler_density_n250"
+STUDY_PATH = f"sqlite:///{OUT_DIR}/hparam_search_smiley_euler_density_n250.db"
+CSV_PATH = f"{OUT_DIR}/hparam_search_smiley_euler_density_n250_results.csv"
 
-# Validated directly (_tmp_check_known_good.py) against the known-good
-# _integrate_guided reproduction (gamma=2.0, lr=0.02, w_term=31.1 ->
-# frac_in_face=1.000, energy_w2~7.99): this exact-density step function at
-# gamma=2.0, alpha=0.01, w_term=20.0 gives frac_in_face=0.875, energy_w2=20.5
-# -- same regime, confirming the teleport-step fix (see make_guided_euler_step's
-# docstring) actually reproduces _integrate_guided's mechanism now.
-SEED_PARAMS = {"gamma": 2.0, "alpha": 0.01, "w_terminal": 20.0}
+# Carried over from the n=200 search (smiley_euler_density_v2, best trial:
+# gamma=0.669, alpha=0.158, w_term=13.6 -> frac_in_face=1.0, energy_w2=7.8)
+# as a starting point -- not re-validated at n=250.
+SEED_PARAMS = {"gamma": 0.669, "alpha": 0.158, "w_terminal": 13.6}
 
 # Fixed, not searched.
-N_STEPS = 200
+N_STEPS = 250
 N_INNER = 1
 EYE_MOUTH_WEIGHT = 5.0
 REJECTION_SAMPLES_PATH = f"{OUT_DIR}/rejection_smiley_samples.pt"

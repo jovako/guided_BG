@@ -203,7 +203,9 @@ def guided_euler_exact(
     if not track_density:
         for k in range(n_steps):
             t = torch.as_tensor(k * dt, device=z.device, dtype=z.dtype)
-            x = step(t, x)
+            x = step(t, x).detach()  # break the graph -- no backward needed here, and
+            # the inner loop's create_graph=True would otherwise retain every step's
+            # graph, growing memory with n_steps until it OOMs.
         return x, None, None
 
     logdet = torch.zeros(batch_size, device=z.device, dtype=z.dtype)
