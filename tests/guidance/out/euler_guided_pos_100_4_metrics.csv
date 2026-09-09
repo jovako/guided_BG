@@ -1,9 +1,0 @@
-metric,value
-euler_guided_pos_100_4/mean-energy,-34.50348663330078
-euler_guided_pos_100_4/correct-chirality-rate,0.4909999966621399
-euler_guided_pos_100_4/frac-in-target-box,0.0
-euler_guided_pos_100_4/mean-phi,0.9509649872779846
-euler_guided_pos_100_4/mean-psi,0.1642027646303177
-euler_guided_pos_100_4/energy-w2,22.871702801184515
-euler_guided_pos_100_4/energy-w1,12.91161723437811
-euler_guided_pos_100_4/torus-w2,2.8119749265137948
