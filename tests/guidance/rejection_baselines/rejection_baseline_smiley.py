@@ -54,13 +54,14 @@ OUT_DIR = "tests/guidance/out"
 PREFIX = "rejection_smiley"
 SAMPLES_PATH = f"{OUT_DIR}/{PREFIX}_samples.pt"
 
-# Same box target and derived smiley geometry as plot_guided_euler_ramachandran.py.
+# Same box target and derived smiley geometry as plot_guided_euler_ramachandran.py
+# (kept in sync by hand -- these constants must match that file's active values).
 PHI_TARGET = (-2.0, -1.0)
 PSI_TARGET = (-0.5, 0.5)
 _BOX_CENTER = ((PHI_TARGET[0] + PHI_TARGET[1]) / 2, (PSI_TARGET[0] + PSI_TARGET[1]) / 2)
 _BOX_HALF_EXTENT = min(PHI_TARGET[1] - PHI_TARGET[0], PSI_TARGET[1] - PSI_TARGET[0]) / 2
 _SMILEY_SCALE = 0.9 * _BOX_HALF_EXTENT / 2.2
-_INNER_SCALE = 0.5
+_INNER_SCALE = 0.75
 
 FACE_CENTER = _BOX_CENTER
 FACE_RADIUS = 2.2 * _SMILEY_SCALE
@@ -68,16 +69,16 @@ EYE_CENTERS = [
     (_BOX_CENTER[0] + dx * _INNER_SCALE * _SMILEY_SCALE, _BOX_CENTER[1] + dy * _INNER_SCALE * _SMILEY_SCALE)
     for dx, dy in [(-1.0, 1.0), (1.0, 1.0)]
 ]
-EYE_RADIUS = 0.3 * _SMILEY_SCALE
-MOUTH_PHIS = [-1.2, -0.9, -0.6, -0.3, 0.0, 0.3, 0.6, 0.9, 1.2]
+EYE_RADIUS = 0.4 * _SMILEY_SCALE
+MOUTH_PHIS = [-1.5, -1.125, -0.75, -0.375, 0.0, 0.375, 0.75, 1.125, 1.5]
 MOUTH_CENTERS = [
     (
         _BOX_CENTER[0] + p * _INNER_SCALE * _SMILEY_SCALE,
-        _BOX_CENTER[1] + (-1.3 + 0.2 * p**2) * _INNER_SCALE * _SMILEY_SCALE,
+        _BOX_CENTER[1] + (-1.5 + 0.35 * p**2) * _INNER_SCALE * _SMILEY_SCALE,
     )
     for p in MOUTH_PHIS
 ]
-MOUTH_RADIUS = 0.2 * _SMILEY_SCALE
+MOUTH_RADIUS = 0.35 * _SMILEY_SCALE
 
 
 def load_model_and_data():
@@ -121,6 +122,13 @@ def main() -> None:
     phi_idx = get_dihedral_atom_indices(eval_ctx.topology, kind="phi")
     psi_idx = get_dihedral_atom_indices(eval_ctx.topology, kind="psi")
     chirality_checker = ChiralitySignChecker(eval_ctx.topology, eval_ctx.true_data.samples[:1])
+
+    # Per the dopri5 tolerance sweep (sweep_dopri5_tolerance.py), atol=rtol=3e-3
+    # already matches/beats the codebase's tight 1e-5 default in energy-w2 to
+    # the true reference while needing far fewer NFEs (~50 vs ~140) -- much
+    # cheaper for the many batches rejection sampling needs here.
+    model.atol = 3e-3
+    model.rtol = 3e-3
 
     torch.manual_seed(SEED)
 
