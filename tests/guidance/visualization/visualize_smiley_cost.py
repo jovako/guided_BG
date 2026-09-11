@@ -1,10 +1,10 @@
 """Visualize the smiley guidance cost function over phi/psi space.
 
 Pure geometry -- no model, no GPU, safe to run alongside anything else. Plots
-the exact cost from make_cost_fn in the hparam_search_smiley_* scripts
+the exact cost from plot_guided_euler_ramachandran.py's smiley_cost_fn
 (within_radius_penalty for the face + EYE_MOUTH_WEIGHT * repel_within_radius_
-penalty for each eye/mouth hole), reusing those functions directly rather
-than reimplementing the math.
+penalty for each eye/mouth hole, using the periodic torus_distance), importing
+that script's live geometry directly rather than duplicating it.
 
 Left panel: full [-pi, pi] Ramachandran domain, showing how small the smiley
 region is relative to the whole space (rendered as a colored box, since it is
@@ -24,45 +24,31 @@ import numpy as np
 import torch
 from matplotlib.colors import LogNorm
 
-from transferable_samplers.guidance.costs import repel_within_radius_penalty, within_radius_penalty
+from transferable_samplers.guidance.costs import repel_within_radius_penalty, torus_distance, within_radius_penalty
+
+from plot_guided_euler_ramachandran import (
+    EYE_CENTERS,
+    EYE_MOUTH_WEIGHT,
+    EYE_RADIUS,
+    FACE_CENTER,
+    FACE_RADIUS,
+    MOUTH_CENTERS,
+    MOUTH_RADIUS,
+    PHI_TARGET,
+    PSI_TARGET,
+)
 
 OUT_PATH = "tests/guidance/out/smiley_cost_landscape.png"
-EYE_MOUTH_WEIGHT = 15.0  # matches the hparam_search_smiley_* scripts
-
-# Same box target + derived smiley geometry as the guidance scripts.
-PHI_TARGET = (-2.0, -1.0)
-PSI_TARGET = (-0.5, 0.5)
-_BOX_CENTER = ((PHI_TARGET[0] + PHI_TARGET[1]) / 2, (PSI_TARGET[0] + PSI_TARGET[1]) / 2)
-_BOX_HALF_EXTENT = min(PHI_TARGET[1] - PHI_TARGET[0], PSI_TARGET[1] - PSI_TARGET[0]) / 2
-_SMILEY_SCALE = 0.9 * _BOX_HALF_EXTENT / 2.2
-_INNER_SCALE = 0.75
-
-FACE_CENTER = _BOX_CENTER
-FACE_RADIUS = 2.2 * _SMILEY_SCALE
-EYE_CENTERS = [
-    (_BOX_CENTER[0] + dx * _INNER_SCALE * _SMILEY_SCALE, _BOX_CENTER[1] + dy * _INNER_SCALE * _SMILEY_SCALE)
-    for dx, dy in [(-1.0, 1.0), (1.0, 1.0)]
-]
-EYE_RADIUS = 0.4 * _SMILEY_SCALE
-MOUTH_PHIS = [-1.5, -1.125, -0.75, -0.375, 0.0, 0.375, 0.75, 1.125, 1.5]
-MOUTH_CENTERS = [
-    (
-        _BOX_CENTER[0] + p * _INNER_SCALE * _SMILEY_SCALE,
-        _BOX_CENTER[1] + (-1.5 + 0.35 * p**2) * _INNER_SCALE * _SMILEY_SCALE,
-    )
-    for p in MOUTH_PHIS
-]
-MOUTH_RADIUS = 0.35 * _SMILEY_SCALE
 
 
 def cost(phi: torch.Tensor, psi: torch.Tensor) -> torch.Tensor:
-    dist_to_face = torch.sqrt((phi - FACE_CENTER[0]) ** 2 + (psi - FACE_CENTER[1]) ** 2)
+    dist_to_face = torus_distance(phi, psi, FACE_CENTER[0], FACE_CENTER[1])
     c = within_radius_penalty(dist_to_face, FACE_RADIUS)
     for cx, cy in EYE_CENTERS:
-        d = torch.sqrt((phi - cx) ** 2 + (psi - cy) ** 2)
+        d = torus_distance(phi, psi, cx, cy)
         c = c + EYE_MOUTH_WEIGHT * repel_within_radius_penalty(d, EYE_RADIUS)
     for cx, cy in MOUTH_CENTERS:
-        d = torch.sqrt((phi - cx) ** 2 + (psi - cy) ** 2)
+        d = torus_distance(phi, psi, cx, cy)
         c = c + EYE_MOUTH_WEIGHT * repel_within_radius_penalty(d, MOUTH_RADIUS)
     return c
 

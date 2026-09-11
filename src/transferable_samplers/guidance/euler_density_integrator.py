@@ -64,7 +64,7 @@ __all__ = [
 def make_guided_euler_step(
     net: Callable,
     encodings: dict[str, Tensor] | None,
-    terminal_cost: Callable[[Tensor], Tensor],
+    terminal_cost: Callable[[Tensor, Tensor], Tensor],
     *,
     dt: float,
     gamma: float | Callable[[Tensor], float] = 1.0,
@@ -83,8 +83,13 @@ def make_guided_euler_step(
             with ``t`` shape ``(1,)`` (broadcasts to any batch size) and
             ``x`` shape ``(B, d)``. Pass a detached ``copy.deepcopy``.
         encodings: System conditioning, batched to match ``x``.
-        terminal_cost: ``C(x1_hat) -> scalar``, single-sample convention
-            (``(d,)`` in, scalar out) -- vmapped internally over the batch.
+        terminal_cost: ``C(x1_hat, t) -> scalar``, single-sample convention
+            for ``x1_hat`` (``(d,)`` in, scalar out), ``t`` a 0-d tensor
+            (the current step's time, shared by the whole batch -- not
+            vmapped) -- vmapped internally over the batch. ``t`` lets a cost
+            switch behavior across the trajectory (e.g. a time-varying
+            target early on, a fixed shape late); ignore it for a
+            time-independent cost.
         dt: Euler step size, baked in at construction (the teleport term
             isn't ``dt``-rescalable by a generic integrator).
         gamma: Control weight in ``cxt = x + gamma*u``, constant or callable of ``t``.
@@ -105,7 +110,7 @@ def make_guided_euler_step(
             args=(t.reshape(1), x), kwargs={"encodings": encodings},
         )
 
-    terminal_cost_batched = vmap(terminal_cost)  # (B, d) -> (B,)
+    terminal_cost_batched = vmap(terminal_cost, in_dims=(0, None))  # (B, d), () -> (B,)
 
     def inner_objective_sum(u: Tensor, t: Tensor, x: Tensor, f0: Tensor, gamma_t: Tensor) -> Tensor:
         # Sum over the batch: valid since samples don't interact, and lets one
@@ -113,7 +118,7 @@ def make_guided_euler_step(
         cxt = x + gamma_t * u
         v_control = f_theta(t, cxt)
         x1_hat = cxt + (1.0 - t) * v_control  # linear extrapolation from cxt to t=1
-        total = terminal_cost_batched(x1_hat).sum()
+        total = terminal_cost_batched(x1_hat, t).sum()
 
         if lam != 0.0:
             total = total + lam * (u * u).sum()
@@ -349,7 +354,7 @@ def check_unguided_consistency(model, z: Tensor, n_steps_list: tuple[int, ...] =
     net.requires_grad_(False)
 
     make_step0 = partial(
-        make_guided_euler_step, net, None, terminal_cost=lambda x1: (x1 * 0.0).sum(),
+        make_guided_euler_step, net, None, terminal_cost=lambda x1, t: (x1 * 0.0).sum(),
         alpha=0.0, n_inner=0, use_score_deviation=False,
     )
 

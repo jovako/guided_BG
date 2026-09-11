@@ -40,6 +40,7 @@ from bootstrap import bootstrap_mean_ci
 
 from transferable_samplers.evaluation.metrics.wasserstein_distances import energy_wasserstein, torus_wasserstein
 from transferable_samplers.evaluation.plots.plot_ramachandran import plot_ramachandran
+from transferable_samplers.guidance.costs import torus_distance
 from transferable_samplers.guidance.observables import dihedrals, get_dihedral_atom_indices
 from transferable_samplers.utils.chirality import ChiralitySignChecker
 from transferable_samplers.utils.init_resume_utils import resolve_init
@@ -102,13 +103,13 @@ def load_model_and_data():
 
 def in_smiley_region(phi: torch.Tensor, psi: torch.Tensor) -> torch.Tensor:
     """True where (phi, psi) is inside the face circle and outside every eye/mouth hole."""
-    dist_to_face = torch.sqrt((phi - FACE_CENTER[0]) ** 2 + (psi - FACE_CENTER[1]) ** 2)
+    dist_to_face = torus_distance(phi, psi, FACE_CENTER[0], FACE_CENTER[1])
     accept = dist_to_face <= FACE_RADIUS
     for cx, cy in EYE_CENTERS:
-        d = torch.sqrt((phi - cx) ** 2 + (psi - cy) ** 2)
+        d = torus_distance(phi, psi, cx, cy)
         accept = accept & (d > EYE_RADIUS)
     for cx, cy in MOUTH_CENTERS:
-        d = torch.sqrt((phi - cx) ** 2 + (psi - cy) ** 2)
+        d = torus_distance(phi, psi, cx, cy)
         accept = accept & (d > MOUTH_RADIUS)
     return accept
 

@@ -97,7 +97,7 @@ def main() -> None:
     ]:
         t0 = time.time()
         x, neg_logq, _valid = generate_proposal_guided_euler(
-            model, NUM_SAMPLES, cfg.data.num_atoms, lambda x1: w_terminal * terminal_cost(x1),
+            model, NUM_SAMPLES, cfg.data.num_atoms, lambda x1, t: w_terminal * terminal_cost(x1),
             gamma=gamma, alpha=alpha, n_inner=1, n_steps=N_STEPS, use_score_deviation=False, beta=0.0,
             device=device, check_orientation=False,  # exploratory guided run -- don't abort on a stray flip
         )

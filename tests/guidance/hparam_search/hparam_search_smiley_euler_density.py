@@ -1,8 +1,16 @@
 """Optuna (TPE) hyperparameter search: smiley guidance via the exact-density
 guided Euler integrator (euler_density_integrator.py), searched cheaply with
-``track_density=False`` (skips the per-step jacrev Jacobian -- ~60x cheaper,
-see that module's docstring) and no density needed for this frac_in_face/
-energy-w2 comparison.
+``track_density=False`` (skips the per-step Jacobian -- see that module's
+docstring) since no density is needed for this frac_in_face/energy-w2
+comparison.
+
+Narrow search around the live config in plot_guided_euler_ramachandran.py:
+gamma_hi=2.1, gamma_lo_slope=12.0 (quadratic rise: lo_slope*t**2),
+gamma_threshold=0.4, gamma_use_decay=True, gamma_decay_threshold=0.4,
+gamma_decay_slope_mag=2.0, alpha=0.089, w_terminal=22.4. gamma_use_decay and
+gamma_threshold are FIXED here (not searched) -- the point of a narrow search
+is to refine the decay-schedule shape around this specific regime, not
+re-explore whether decay helps at all or when the rise phase should end.
 
 Same objective as the other smiley searches (minimize the Wasserstein
 distance to the unguided rejection-sampling baseline subject to
@@ -13,18 +21,18 @@ frac_in_face >= FRAC_IN_FACE_TARGET), but using
       step function is ``x_next = cxt + dt*v_control`` where
       ``cxt = x + gamma*u`` -- matching ``_integrate_guided``'s exact
       recursion (the control's shift is teleported directly into the
-      trajectory, not merely used to compute a velocity). Two earlier,
-      weaker versions were tried and fixed this session: the reference
-      guided_euler.py's original ``F = f0 + u`` never re-evaluated the
-      network at all; a later fix re-evaluated the network at ``cxt`` but
-      still routed through a plain ``x + dt*F(t,x)`` step, silently
-      discarding the teleport. See make_guided_euler_step's docstring in
-      euler_density_integrator.py for the full account.
-    - n_steps=250 (the minimum step count found orientation-safe this
-      session: n=200/225 had a nontrivial fraction of samples go
-      non-orientation-preserving near t=1 (28%/9% at batch=64), n=250/300
-      had zero failures)
-Searched: gamma, alpha (inner step length), w_terminal.
+      trajectory, not merely used to compute a velocity). See
+      make_guided_euler_step's docstring in euler_density_integrator.py.
+    - n_steps=250 (the minimum step count found orientation-safe for the
+      UNGUIDED case; the guided case turned out to fail orientation much
+      more often -- guidance's position teleport is itself a source of
+      curvature, hence the gamma schedule below rather than a constant)
+    - gamma as a schedule: quadratic rise (0 -> hi, lo_slope*t**2) up to
+      gamma_threshold (fixed at 0.4), then a plateau at hi, then a decline
+      (negative slope) back toward 0 starting at gamma_decay_threshold.
+Searched: gamma_hi, gamma_lo_slope, gamma_decay_threshold,
+gamma_decay_slope_mag, alpha (inner step length), w_terminal.
+gamma_threshold is fixed (not searched, see SEED_PARAMS/GAMMA_THRESHOLD_FIXED).
 
 Once a good trial is found, re-run it with track_density=True (the default)
 to get the exact log-density for that specific configuration.
@@ -48,7 +56,7 @@ from hydra import compose, initialize
 from hydra.core.global_hydra import GlobalHydra
 
 from transferable_samplers.evaluation.metrics.wasserstein_distances import energy_wasserstein, torus_wasserstein
-from transferable_samplers.guidance.costs import repel_within_radius_penalty, within_radius_penalty
+from transferable_samplers.guidance.costs import repel_within_radius_penalty, torus_distance, within_radius_penalty
 from transferable_samplers.guidance.euler_density_integrator import generate_proposal_guided_euler
 from transferable_samplers.guidance.observables import dihedrals, get_dihedral_atom_indices
 from transferable_samplers.utils.chirality import ChiralitySignChecker
@@ -62,25 +70,34 @@ FRAC_IN_FACE_TARGET = 0.98
 MIN_FREE_DISK_GB = 2.0
 SEQUENCE = "Ace-A-Nme"
 OUT_DIR = "tests/guidance/out"
-STUDY_NAME = "smiley_euler_density_n250"
-STUDY_PATH = f"sqlite:///{OUT_DIR}/hparam_search_smiley_euler_density_n250.db"
-CSV_PATH = f"{OUT_DIR}/hparam_search_smiley_euler_density_n250_results.csv"
+STUDY_NAME = "smiley_euler_density_n250_gammaquad_decay_v2"
+STUDY_PATH = f"sqlite:///{OUT_DIR}/hparam_search_{STUDY_NAME}.db"
+CSV_PATH = f"{OUT_DIR}/hparam_search_{STUDY_NAME}_results.csv"
 
-# Carried over from the n=200 search (smiley_euler_density_v2, best trial:
-# gamma=0.669, alpha=0.158, w_term=13.6 -> frac_in_face=1.0, energy_w2=7.8)
-# as a starting point -- not re-validated at n=250.
-SEED_PARAMS = {"gamma": 0.669, "alpha": 0.158, "w_terminal": 13.6}
+# Current live config from plot_guided_euler_ramachandran.py (quadratic rise:
+# gamma = gamma_lo_slope * t**2 up to gamma_threshold).
+SEED_PARAMS = {
+    "gamma_hi": 2.1, "gamma_lo_slope": 12.0,
+    "gamma_decay_threshold": 0.4, "gamma_decay_slope_mag": 2.0,
+    "alpha": 8.9e-2, "w_terminal": 22.4,
+}
 
 # Fixed, not searched.
 N_STEPS = 250
 N_INNER = 1
 EYE_MOUTH_WEIGHT = 5.0
 REJECTION_SAMPLES_PATH = f"{OUT_DIR}/rejection_smiley_samples.pt"
+GAMMA_USE_DECAY = True  # fixed on for this search, see module docstring
+GAMMA_THRESHOLD_FIXED = 0.4  # rise threshold, fixed not searched (per user instruction)
 
+# Narrow ranges around SEED_PARAMS.
+GAMMA_DECAY_THRESHOLD_BOUNDS = (0.4, 0.7)
 BOUNDS = {
-    "gamma": (0.3, 6.0),
-    "alpha": (0.001, 0.5),  # _integrate_guided's gd branch needed lr~0.001-0.05 at similar step counts
-    "w_terminal": (5.0, 100.0),
+    "gamma_hi": (1.2, 3.2),
+    "gamma_lo_slope": (8.0, 25.0),
+    "gamma_decay_slope_mag": (1.0, 5.0),
+    "alpha": (0.03, 0.15),
+    "w_terminal": (10.0, 45.0),
 }
 
 # Same box target + derived smiley geometry as plot_guided_euler_ramachandran.py
@@ -111,7 +128,11 @@ MOUTH_RADIUS = 0.35 * _SMILEY_SCALE
 
 CSV_FIELDNAMES = [
     "optuna_trial_number",
-    "gamma",
+    "gamma_hi",
+    "gamma_lo_slope",
+    "gamma_threshold",
+    "gamma_decay_threshold",
+    "gamma_decay_slope_mag",
     "alpha",
     "w_terminal",
     "frac_in_face",
@@ -156,17 +177,39 @@ def make_terminal_cost(phi_idx, psi_idx, chirality_checker):
         x1_fixed = x1 * sign
         phi = dihedrals(x1_fixed, phi_idx).squeeze(-1)
         psi = dihedrals(x1_fixed, psi_idx).squeeze(-1)
-        dist_to_face = torch.sqrt((phi - FACE_CENTER[0]) ** 2 + (psi - FACE_CENTER[1]) ** 2)
+        dist_to_face = torus_distance(phi, psi, FACE_CENTER[0], FACE_CENTER[1])
         cost = within_radius_penalty(dist_to_face, FACE_RADIUS)
         for cx, cy in EYE_CENTERS:
-            dist = torch.sqrt((phi - cx) ** 2 + (psi - cy) ** 2)
+            dist = torus_distance(phi, psi, cx, cy)
             cost = cost + EYE_MOUTH_WEIGHT * repel_within_radius_penalty(dist, EYE_RADIUS)
         for cx, cy in MOUTH_CENTERS:
-            dist = torch.sqrt((phi - cx) ** 2 + (psi - cy) ** 2)
+            dist = torus_distance(phi, psi, cx, cy)
             cost = cost + EYE_MOUTH_WEIGHT * repel_within_radius_penalty(dist, MOUTH_RADIUS)
         return cost.squeeze()
 
     return terminal_cost
+
+
+def make_gamma(params: dict):
+    """Quadratic rise (0 -> hi, ``lo_slope * t**2``) up to gamma_threshold,
+    then a plateau at hi -- optionally followed by a decline (negative
+    slope) back toward 0 starting at gamma_decay_threshold, if
+    params["gamma_use_decay"]. Matches plot_guided_euler_ramachandran.py's
+    current ``_gamma_fn``.
+    """
+    hi, lo_slope, rise_threshold = params["gamma_hi"], params["gamma_lo_slope"], params["gamma_threshold"]
+    use_decay = params.get("gamma_use_decay", False)
+    decay_threshold = params.get("gamma_decay_threshold")
+    decay_slope = -params["gamma_decay_slope_mag"] if use_decay else None
+
+    def gamma_fn(t: torch.Tensor) -> float:
+        if t <= rise_threshold:
+            return lo_slope * t**2
+        if not use_decay or t <= decay_threshold:
+            return hi
+        return max(0.0, hi + decay_slope * (t - decay_threshold))
+
+    return gamma_fn
 
 
 def objective_value(frac_in_face: float, energy_w2: float, failed: bool) -> float:
@@ -189,8 +232,8 @@ def run_trial(model, eval_ctx, phi_idx, psi_idx, chirality_checker, num_atoms, d
     result = dict(params)
     try:
         x, _, _ = generate_proposal_guided_euler(
-            model, EVAL_BATCH, num_atoms, lambda x1: params["w_terminal"] * terminal_cost(x1),
-            gamma=params["gamma"], alpha=params["alpha"], n_inner=N_INNER, n_steps=N_STEPS,
+            model, EVAL_BATCH, num_atoms, lambda x1, t: params["w_terminal"] * terminal_cost(x1),
+            gamma=make_gamma(params), alpha=params["alpha"], n_inner=N_INNER, n_steps=N_STEPS,
             use_score_deviation=False, beta=0.0, device=device, track_density=False,
         )
         x = x.detach()
@@ -202,15 +245,15 @@ def run_trial(model, eval_ctx, phi_idx, psi_idx, chirality_checker, num_atoms, d
 
         phi = dihedrals(x_phys, phi_idx).squeeze(-1)
         psi = dihedrals(x_phys, psi_idx).squeeze(-1)
-        dist_to_face = torch.sqrt((phi - FACE_CENTER[0]) ** 2 + (psi - FACE_CENTER[1]) ** 2)
+        dist_to_face = torus_distance(phi, psi, FACE_CENTER[0], FACE_CENTER[1])
         frac_in_face = (dist_to_face <= FACE_RADIUS).float().mean().item()
 
         in_eye_or_mouth = torch.zeros(EVAL_BATCH, dtype=torch.bool)
         for cx, cy in EYE_CENTERS:
-            d = torch.sqrt((phi - cx) ** 2 + (psi - cy) ** 2)
+            d = torus_distance(phi, psi, cx, cy)
             in_eye_or_mouth = in_eye_or_mouth | (d <= EYE_RADIUS)
         for cx, cy in MOUTH_CENTERS:
-            d = torch.sqrt((phi - cx) ** 2 + (psi - cy) ** 2)
+            d = torus_distance(phi, psi, cx, cy)
             in_eye_or_mouth = in_eye_or_mouth | (d <= MOUTH_RADIUS)
 
         with torch.no_grad():
@@ -291,10 +334,15 @@ def main() -> None:
             raise optuna.exceptions.TrialPruned()
 
         params = {
-            "gamma": trial.suggest_float("gamma", *BOUNDS["gamma"], log=True),
+            "gamma_hi": trial.suggest_float("gamma_hi", *BOUNDS["gamma_hi"], log=True),
+            "gamma_lo_slope": trial.suggest_float("gamma_lo_slope", *BOUNDS["gamma_lo_slope"], log=True),
+            "gamma_threshold": GAMMA_THRESHOLD_FIXED,
+            "gamma_decay_threshold": trial.suggest_float("gamma_decay_threshold", *GAMMA_DECAY_THRESHOLD_BOUNDS),
+            "gamma_decay_slope_mag": trial.suggest_float("gamma_decay_slope_mag", *BOUNDS["gamma_decay_slope_mag"], log=True),
             "alpha": trial.suggest_float("alpha", *BOUNDS["alpha"], log=True),
             "w_terminal": trial.suggest_float("w_terminal", *BOUNDS["w_terminal"], log=True),
         }
+        params["gamma_use_decay"] = GAMMA_USE_DECAY
 
         result = run_trial(model, eval_ctx, phi_idx, psi_idx, chirality_checker, num_atoms, device, rejection_data, params)
         value = objective_value(result["frac_in_face"], result["vs_rejection_energy_w2"], result["failed"])
@@ -314,8 +362,12 @@ def main() -> None:
                     best_marker = " *new best*"
             except ValueError:
                 pass
+        gamma_desc = (
+            f"gamma_hi={params['gamma_hi']:.3g} lo_slope={params['gamma_lo_slope']:.3g} t*={params['gamma_threshold']:.3g} "
+            f"decay_t*={params['gamma_decay_threshold']:.3g} decay_slope=-{params['gamma_decay_slope_mag']:.3g}"
+        )
         print(
-            f"[{elapsed_min:6.1f} min] optuna trial {trial.number}: gamma={params['gamma']:.4g} "
+            f"[{elapsed_min:6.1f} min] optuna trial {trial.number}: {gamma_desc} "
             f"alpha={params['alpha']:.4g} w_term={params['w_terminal']:.3g} -> {status}{best_marker}",
             flush=True,
         )
