@@ -48,7 +48,7 @@ from transferable_samplers.utils.init_resume_utils import resolve_init
 from transferable_samplers.utils.standardization import destandardize_coords
 
 BATCH = 128
-CHUNKS = 17
+CHUNKS = 18
 SEED_BASE = 10_000  # chunk i uses seed SEED_BASE + i -- distinct from SEED=42 used elsewhere
 N_STEPS = 250
 SEQUENCE = "Ace-A-Nme"
