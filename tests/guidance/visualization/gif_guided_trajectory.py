@@ -106,7 +106,7 @@ from plot_guided_euler_ramachandran import (
 )
 from plot_unguided_euler_ramachandran import EULER_STEPS as UNGUIDED_EULER_STEPS
 
-GIF_OBJECTIVE = "pos_phi"  # "pos_phi", "phi_target", "phi_psi_target", "smiley", "smiley_reference", "unguided"
+GIF_OBJECTIVE = "phi_psi_target"  # "pos_phi", "phi_target", "phi_psi_target", "smiley", "smiley_reference", "unguided"
 GIF_ZOOM = "full"  # "full" or "zoom"
 GIF_BACKGROUND = "density"  # "none", "density", or "cost"
 

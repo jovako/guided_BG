@@ -104,10 +104,10 @@ USE_EULER_DENSITY_MODULE = True
 #     GUIDANCE_W_CONTROL=0 -- the "66%-valid" config the current 20h
 #     sample_smiley_guided_snis_pool.py run is using (see that script /
 #     hparam_search_smiley_euler_density.py's SEED_PARAMS).
-OBJECTIVE = "phi_target"  # "pos_phi", "phi_target", "phi_psi_target", "smiley", or "smiley_reference"
+OBJECTIVE = "smiley"  # "pos_phi", "phi_target", "phi_psi_target", "smiley", or "smiley_reference"
 
-NUM_SAMPLES = 2000
-BATCH_SIZE = 128
+NUM_SAMPLES = 64
+BATCH_SIZE = 64
 SEED = 42
 EULER_STEPS = 250
 GUIDANCE_INNER_STEPS = 1
@@ -134,7 +134,7 @@ def _gamma_fn(t: torch.Tensor) -> float:
 
 
 GUIDANCE_GAMMA = _gamma_fn
-GUIDANCE_LR = 6.e-3
+GUIDANCE_LR = 2.e-3
 GUIDANCE_W_TERMINAL = 1.0
 GUIDANCE_W_VF = 0.
 GUIDANCE_W_CONTROL = 0.0
