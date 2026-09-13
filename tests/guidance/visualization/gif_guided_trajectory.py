@@ -106,11 +106,11 @@ from plot_guided_euler_ramachandran import (
 )
 from plot_unguided_euler_ramachandran import EULER_STEPS as UNGUIDED_EULER_STEPS
 
-GIF_OBJECTIVE = "smiley"  # "pos_phi", "phi_target", "phi_psi_target", "smiley", "smiley_reference", "unguided"
+GIF_OBJECTIVE = "pos_phi"  # "pos_phi", "phi_target", "phi_psi_target", "smiley", "smiley_reference", "unguided"
 GIF_ZOOM = "full"  # "full" or "zoom"
-GIF_BACKGROUND = "none"  # "none", "density", or "cost"
+GIF_BACKGROUND = "density"  # "none", "density", or "cost"
 
-NUM_SAMPLES = 32  # trimmed for GPU headroom while other jobs share this GPU -- bump to 1000+ for a
+NUM_SAMPLES = 200  # trimmed for GPU headroom while other jobs share this GPU -- bump to 1000+ for a
 # cleaner point cloud with GIF_BACKGROUND="density"/"smiley" (no drawn target) once the GPU is free
 NUM_BACKGROUND_SAMPLES = 2000  # only used for GIF_BACKGROUND="density"
 SEED = 42

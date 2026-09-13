@@ -47,7 +47,11 @@ def _get_paired_phi_psi_vectors(samples: torch.Tensor, topology: md.Topology) ->
 
 
 def plot_ramachandran(
-    log_image_fn: Callable[[Any, str], None], samples: torch.Tensor, topology: Any, prefix: str = ""
+    log_image_fn: Callable[[Any, str], None],
+    samples: torch.Tensor,
+    topology: Any,
+    prefix: str = "",
+    phi_target: float | None = None,
 ) -> None:
     """Plot per-residue Ramachandran (phi/psi) density maps.
 
@@ -59,6 +63,8 @@ def plot_ramachandran(
         samples: Conformation tensor ``(batch, num_atoms, 3)``.
         topology: mdtraj topology for dihedral computation.
         prefix: Metric key prefix.
+        phi_target: If set, draws a thin dashed vertical line at this phi value
+            (e.g. to mark the target of a "phi_target" guidance objective).
     """
     logger.info(f"Plotting Ramachandran for {prefix}")
     prefix += "/rama"
@@ -99,6 +105,8 @@ def plot_ramachandran(
 
         cbar.ax.invert_yaxis()
         cbar.ax.set_ylabel(r"Free energy / $k_B T$", fontsize=35)
+        if phi_target is not None:
+            ax.axvline(phi_target, color="white", linestyle="--", linewidth=0.8, snap=True)
         log_image_fn(fig, f"{prefix}/ramachandran/{i}")
 
         phi_tmp = phis[:, i]
@@ -121,5 +129,7 @@ def plot_ramachandran(
         cbar = fig.colorbar(im)  # , ticks=ticks)
         im.set_clim(vmax=samples.shape[0] // 20)
         cbar.ax.set_ylabel(f"Count, max = {int(h.max())}", fontsize=18)
+        if phi_target is not None:
+            ax.axvline(phi_target, color="red", linestyle="--", linewidth=0.8, snap=True)
         log_image_fn(fig, f"{prefix}/ramachandran-simple/{i}")
         plt.close()

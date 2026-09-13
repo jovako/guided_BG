@@ -4,8 +4,10 @@ Same setup as ``plot_unguided_euler_ramachandran.py`` (fixed-step Euler
 integration, ECNF++ on Ace-A-Nme, no SNIS/importance-weighting), but with
 ``use_guidance=True``. Set OBJECTIVE below to switch the terminal cost:
     - "pos_phi": one-sided penalty, zero cost once phi > 0.
-    - "phi_target": quadratic penalty, zero cost only exactly at phi=1
-      (1-D: ignores psi entirely).
+    - "phi_target": quadratic penalty, zero cost only exactly at
+      phi=PHI_TARGET_ANGLE (~1, nudged to the center of the nearest
+      plot_ramachandran histogram bin so the plotted target line lands
+      cleanly in one pixel column; 1-D: ignores psi entirely).
     - "phi_psi_target": periodic quadratic penalty, zero cost only exactly at
       (phi, psi) = (PHI_PSI_TARGET[0], PHI_PSI_TARGET[1]) -- a single point in
       the full 2-D Ramachandran plane, using torus_distance so the bowl wraps
@@ -56,6 +58,7 @@ import os
 
 import hydra
 import matplotlib.pyplot as plt
+import numpy as np
 import torch
 from hydra import compose, initialize
 from hydra.core.global_hydra import GlobalHydra
@@ -101,10 +104,10 @@ USE_EULER_DENSITY_MODULE = True
 #     GUIDANCE_W_CONTROL=0 -- the "66%-valid" config the current 20h
 #     sample_smiley_guided_snis_pool.py run is using (see that script /
 #     hparam_search_smiley_euler_density.py's SEED_PARAMS).
-OBJECTIVE = "smiley"  # "pos_phi", "phi_target", "phi_psi_target", "smiley", or "smiley_reference"
+OBJECTIVE = "phi_target"  # "pos_phi", "phi_target", "phi_psi_target", "smiley", or "smiley_reference"
 
-NUM_SAMPLES = 64
-BATCH_SIZE = 32
+NUM_SAMPLES = 2000
+BATCH_SIZE = 128
 SEED = 42
 EULER_STEPS = 250
 GUIDANCE_INNER_STEPS = 1
@@ -115,7 +118,7 @@ GUIDANCE_INNER_STEPS = 1
 # if GAMMA_USE_DECAY. Same schedule shape as
 # hparam_search_smiley_euler_density.py's make_gamma.
 GAMMA_HI = 2.0
-GAMMA_LO_SLOPE = 20.
+GAMMA_LO_SLOPE = 12.
 GAMMA_THRESHOLD = 0.
 GAMMA_USE_DECAY = False
 GAMMA_DECAY_THRESHOLD = 0.7  # >= 0.7, per this session's convention
@@ -124,14 +127,14 @@ GAMMA_DECAY_SLOPE_MAG = 10.0  # magnitude; applied as negative below
 
 def _gamma_fn(t: torch.Tensor) -> float:
     if t <= GAMMA_THRESHOLD:
-        return GAMMA_LO_SLOPE * t**2
+        return GAMMA_LO_SLOPE * t
     if not GAMMA_USE_DECAY or t <= GAMMA_DECAY_THRESHOLD:
         return GAMMA_HI
     return max(0.0, GAMMA_HI - GAMMA_DECAY_SLOPE_MAG * (t - GAMMA_DECAY_THRESHOLD))
 
 
 GUIDANCE_GAMMA = _gamma_fn
-GUIDANCE_LR = 1.e-2
+GUIDANCE_LR = 6.e-3
 GUIDANCE_W_TERMINAL = 1.0
 GUIDANCE_W_VF = 0.
 GUIDANCE_W_CONTROL = 0.0
@@ -161,8 +164,37 @@ REJECTION_SAMPLES_PATH = f"{OUT_DIR}/{_REJECTION_PREFIX}_samples.pt"
 REFERENCE_TRAJECTORY_PATH = f"{OUT_DIR}/linear_coupling_trajectory_smiley_center.pt"
 SMILEY_REFERENCE_T_SWITCH = 0.5
 
-# Single-point target for OBJECTIVE == "phi_psi_target": (phi, psi) in radians.
+# Single-point target for OBJECTIVE == "phi_psi_target": (phi, psi) in radians,
+# before alignment to the Ramachandran histogram grid (see PHI_PSI_TARGET_ANGLE
+# below).
 PHI_PSI_TARGET = (-2.0, 1.5)
+
+# plot_ramachandran's Ramachandran histogram bins (100 bins over [-pi, pi],
+# bin width 2*pi/100) -- used below to nudge each 1-D/2-D target onto the
+# center of its nearest bin, so the plotted target line/point and the
+# "in target bin" metrics land cleanly in one pixel (column, or cell) instead
+# of straddling an edge between two.
+_RAMA_BIN_EDGES = np.linspace(-np.pi, np.pi, 101)
+_RAMA_BIN_CENTERS = (_RAMA_BIN_EDGES[:-1] + _RAMA_BIN_EDGES[1:]) / 2
+
+
+def _nearest_rama_bin_center(value: float) -> float:
+    return float(_RAMA_BIN_CENTERS[np.argmin(np.abs(_RAMA_BIN_CENTERS - value))])
+
+
+def _rama_bin_range(value: float) -> tuple[float, float]:
+    """The [lo, hi) edges of the histogram bin containing ``value``."""
+    idx = int(np.searchsorted(_RAMA_BIN_EDGES, value)) - 1
+    return float(_RAMA_BIN_EDGES[idx]), float(_RAMA_BIN_EDGES[idx + 1])
+
+
+# 1-D target for OBJECTIVE == "phi_target": nudged off exactly 1.0 to the
+# center of the nearest histogram bin.
+PHI_TARGET_ANGLE = _nearest_rama_bin_center(1.0)
+
+# 2-D target for OBJECTIVE == "phi_psi_target": PHI_PSI_TARGET, with each
+# coordinate independently nudged to the center of its nearest histogram bin.
+PHI_PSI_TARGET_ANGLE = (_nearest_rama_bin_center(PHI_PSI_TARGET[0]), _nearest_rama_bin_center(PHI_PSI_TARGET[1]))
 
 # Box target (one blob at phi in [-2, -1], psi around center) that the smiley
 # geometry below is scaled + recentered to fit inside.
@@ -318,27 +350,28 @@ def main() -> None:
         return one_sided_quadratic_penalty(phi, threshold=0.0, penalize_below=True).sum(dim=-1)
 
     def phi_target_cost_fn(x1: torch.Tensor) -> torch.Tensor:
-        # Same chirality correction as pos_phi_cost_fn. Zero only at phi=1,
-        # quadratic penalty growing on both sides -- box_quadratic_penalty with
-        # low=high=1.0 collapses to exactly (phi-1)**2, since only one of its
-        # two relu terms is ever nonzero for a given phi.
+        # Same chirality correction as pos_phi_cost_fn. Zero only at
+        # phi=PHI_TARGET_ANGLE, quadratic penalty growing on both sides --
+        # box_quadratic_penalty with low=high=PHI_TARGET_ANGLE collapses to
+        # exactly (phi-PHI_TARGET_ANGLE)**2, since only one of its two relu
+        # terms is ever nonzero for a given phi.
         with torch.no_grad():
             flip_mask = chirality_checker.flip_mask(x1)
         sign = torch.where(flip_mask, -1.0, 1.0).to(x1)[:, None, None]
         phi = dihedrals(x1 * sign, phi_idx)  # (batch, num_phi)
-        return box_quadratic_penalty(phi, low=1.0, high=1.0).sum(dim=-1)
+        return box_quadratic_penalty(phi, low=PHI_TARGET_ANGLE, high=PHI_TARGET_ANGLE).sum(dim=-1)
 
     def phi_psi_target_cost_fn(x1: torch.Tensor) -> torch.Tensor:
         # Same chirality correction as pos_phi_cost_fn, applied to both phi and
         # psi. Periodic quadratic bowl (torus_distance) centered on
-        # PHI_PSI_TARGET -- zero cost only exactly at that single point.
+        # PHI_PSI_TARGET_ANGLE -- zero cost only exactly at that single point.
         with torch.no_grad():
             flip_mask = chirality_checker.flip_mask(x1)
         sign = torch.where(flip_mask, -1.0, 1.0).to(x1)[:, None, None]
         x1_fixed = x1 * sign
         phi = dihedrals(x1_fixed, phi_idx).squeeze(-1)
         psi = dihedrals(x1_fixed, psi_idx).squeeze(-1)
-        dist = torus_distance(phi, psi, PHI_PSI_TARGET[0], PHI_PSI_TARGET[1])
+        dist = torus_distance(phi, psi, PHI_PSI_TARGET_ANGLE[0], PHI_PSI_TARGET_ANGLE[1])
         return quadratic_target_penalty(dist)
 
     def smiley_cost_fn(x1: torch.Tensor) -> torch.Tensor:
@@ -483,7 +516,13 @@ def main() -> None:
         print(f"saved {path}")
         plt.close(fig)
 
-    plot_ramachandran(log_image_fn, samples_physical, eval_ctx.topology, prefix=PREFIX)
+    plot_ramachandran(
+        log_image_fn,
+        samples_physical,
+        eval_ctx.topology,
+        prefix=PREFIX,
+        phi_target=PHI_TARGET_ANGLE if OBJECTIVE == "phi_target" else None,
+    )
 
     with torch.no_grad():
         e_generated = eval_ctx.target_energy.energy(samples)
@@ -511,6 +550,22 @@ def main() -> None:
         f"{PREFIX}/mean-phi": phi_generated.mean().item(),
         f"{PREFIX}/mean-psi": psi_generated.mean().item(),
     }
+
+    if OBJECTIVE in ("phi_target", "phi_psi_target"):
+        # Fraction of samples that landed outside the target's own bin/cell in
+        # the plot_ramachandran histogram (same 100x100 bins over [-pi, pi]
+        # used for PHI_TARGET_ANGLE/PHI_PSI_TARGET_ANGLE above) -- i.e. not in
+        # the pixel (column, for phi_target; cell, for phi_psi_target) the
+        # target sits in -- plus the mean energy of just those in-bin samples.
+        phi_lo, phi_hi = _rama_bin_range(PHI_TARGET_ANGLE if OBJECTIVE == "phi_target" else PHI_PSI_TARGET_ANGLE[0])
+        in_target_bin = (phi_generated >= phi_lo) & (phi_generated < phi_hi)
+        if OBJECTIVE == "phi_psi_target":
+            psi_lo, psi_hi = _rama_bin_range(PHI_PSI_TARGET_ANGLE[1])
+            in_target_bin = in_target_bin & (psi_generated >= psi_lo) & (psi_generated < psi_hi)
+        metrics[f"{PREFIX}/frac-outside-target-bin"] = 1 - in_target_bin.float().mean().item()
+        metrics[f"{PREFIX}/mean-energy-in-target-bin"] = (
+            e_generated[in_target_bin].mean().item() if in_target_bin.any() else float("nan")
+        )
     metrics.update(energy_wasserstein(pred_energy=e_generated, true_energy=eval_ctx.true_data.E_target, prefix=PREFIX))
     metrics.update(torus_wasserstein(eval_ctx.true_data.samples, samples_physical, eval_ctx.topology, prefix=PREFIX))
 
