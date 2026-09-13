@@ -160,6 +160,7 @@ def guided_euler_exact(
     check_orientation: bool = True,
     track_density: bool = True,
     raise_on_orientation_failure: bool = True,
+    on_step: Callable[[int, Tensor], None] | None = None,
 ) -> tuple[Tensor, Tensor | None, Tensor | None]:
     """Integrate t=0 to t=1 with a guided Euler step, optionally accumulating
     the exact log-Jacobian.
@@ -192,6 +193,11 @@ def guided_euler_exact(
             failures via the returned ``valid`` mask -- use this with large
             batches where a minority failing (typically near ``t=1``)
             shouldn't discard the rest; filter with ``x[valid]``/``logdet[valid]``.
+        on_step: Optional ``(k, step_valid) -> None`` callback, called once per
+            step with that step's own ``(B,)`` orientation mask (before it's
+            ANDed into the running ``valid``) -- lets a caller log per-step
+            flip counts/locations without changing the return contract.
+            Ignored if ``track_density`` or ``check_orientation`` is False.
 
     Returns:
         x: ``(B, d)`` samples.
@@ -232,6 +238,8 @@ def guided_euler_exact(
             sign, ld = torch.linalg.slogdet(M)
             if check_orientation:
                 step_valid = sign > 0
+                if on_step is not None:
+                    on_step(k, step_valid)
                 if raise_on_orientation_failure and not bool(step_valid.all()):
                     raise RuntimeError(
                         f"Euler step {k} is not orientation-preserving "
