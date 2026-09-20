@@ -1,15 +1,9 @@
-"""Build the full 250-state linear-coupling interpolation path between a real
-accepted (rejection-sampled, unguided) sample near the smiley center and a
-Gaussian noise draw, and save every intermediate state.
+"""Build the 250-state linear-coupling interpolation path x_t = (1-t)*x0 + t*x1
+between a real accepted (rejection-sampled, unguided) sample near the smiley
+center and a Gaussian noise draw, and save every intermediate state.
 
-flow_matching_module.py trains on x_t = (1-t)*x0 + t*x1 (sigma=0.0 for this
-config, so no extra interpolation noise), x0 ~ the model's own Gaussian prior
-(NormalDistribution, optionally zero-CoM) and x1 = a real data sample -- see
-_get_xt/_get_flow_targets. This script fixes x1 = whichever
-rejection_smiley_samples.pt sample sits closest to FACE_CENTER, draws one
-x0 ~ model.prior, and evaluates that SAME linear segment at 250 evenly spaced
-t in [0, 1], saving each x_t. No network evaluation needed -- x0 and x1 are
-fixed endpoints, so every intermediate state is pure interpolation arithmetic.
+x1 is whichever rejection_smiley_samples.pt sample sits closest to
+FACE_CENTER; x0 ~ model.prior. Pure interpolation arithmetic, no network call.
 
 Run with:
     uv run python tests/guidance/integrator_checks/linear_coupling_trajectory_smiley_center.py
@@ -55,14 +49,11 @@ def main() -> None:
         f"(FACE_RADIUS={FACE_RADIUS:.4f})"
     )
 
-    # x1 in the model's native (normalized, zero-CoM) space -- destandardize_coords
-    # only scales by std (CoM was already removed and stays removed), so dividing
-    # by the same std is the exact inverse.
     x1_phys = samples_physical[best_idx : best_idx + 1].to(device)
-    x1 = x1_phys / eval_ctx.normalization_std
+    x1 = x1_phys / eval_ctx.normalization_std  # to normalized space
 
     torch.manual_seed(SEED)
-    x0 = model.prior.sample(1, num_atoms, device=device)  # Gaussian noise, same prior as training/generation
+    x0 = model.prior.sample(1, num_atoms, device=device)
 
     t_values = torch.linspace(0.0, 1.0, N_STATES, device=device)
     # (N_STATES, 1, 1) broadcasts against x0/x1's (1, atoms, dims)

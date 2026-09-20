@@ -40,10 +40,7 @@ SEQUENCE = "Ace-A-Nme"
 GAMMA = 2.0
 ALPHA = 6e-3
 W_TERMINAL = 20.0
-# All orientation failures in the previous run landed on the very last Euler
-# step (k=N_STEPS-1, t=(N_STEPS-1)/N_STEPS) -- try halving gamma just there,
-# to see if that alone keeps those samples orientation-preserving.
-LAST_STEP_GAMMA_SCALE = 0.
+LAST_STEP_GAMMA_SCALE = 0.  # scale gamma down on the final Euler step
 
 
 def gamma_fn(t: torch.Tensor) -> float:

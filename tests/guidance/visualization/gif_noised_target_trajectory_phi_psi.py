@@ -1,18 +1,13 @@
-"""GIF of the noised smiley-center reference sample's OWN phi/psi as it moves
+"""GIF of the noised smiley-center reference sample's own phi/psi as it moves
 under the linear coupling schedule x_t = (1-t)*x0 + t*x1, t: 0 -> 1.
 
-Uses the 250 states already saved by linear_coupling_trajectory_smiley_center.py
-(tests/guidance/out/linear_coupling_trajectory_smiley_center.pt) -- this is the
-RAW interpolated point's own dihedral angles at each t, no network involved
-(dihedral angles are scale-invariant, so computing them directly on the
-normalized-space x_t is the same as on destandardized coordinates, same
-convention the guidance cost functions already use). At t=0 this is a
-(mostly meaningless) dihedral reading of pure Gaussian noise; at t=1 it's
-exactly the real rejection-sampled smiley-center point (x_t_all[-1] == x1 by
-construction, verified in that script).
+Uses the states saved by linear_coupling_trajectory_smiley_center.py: the raw
+interpolated point's own dihedral angles at each t, no network involved. At
+t=0 this is a dihedral reading of pure Gaussian noise; at t=1 it's the real
+rejection-sampled smiley-center point.
 
 Not to be confused with the "current prediction" phi/psi used by the
-smiley_reference guidance cost (the network's endpoint prediction AT each
+smiley_reference guidance cost (the network's endpoint prediction at each
 noised state) -- this plots the noised state's own raw angle, no v_theta call.
 
 Run with:

@@ -1,16 +1,12 @@
-"""GIF of a reference (noised) sample's own MODEL PREDICTION as it moves under
+"""GIF of a reference (noised) sample's own model prediction as it moves under
 the linear coupling schedule x_t = (1-t)*x0 + t*x1, t: 0 -> 1.
 
-Unlike gif_noised_target_trajectory_phi_psi.py (which plots the raw noised
-point x_t's own dihedral angles, no network involved), this plots
-phi/psi of the network's endpoint PREDICTION at each t --
-x1_hat = x_t + (1-t)*v_theta(t, x_t) -- the same quantity the "smiley_reference"
-guidance cost tracks (the blue star in gif_guided_trajectory.py's
-smiley_reference mode), shown here alone with no guided samples.
+Unlike gif_noised_target_trajectory_phi_psi.py (raw noised point x_t's own
+dihedral angles, no network involved), this plots phi/psi of the network's
+endpoint prediction x1_hat = x_t + (1-t)*v_theta(t, x_t) -- the same quantity
+the "smiley_reference" guidance cost tracks.
 
-Set REFERENCE_PATH below to whichever saved reference file you want to
-visualize (default: the second reference,
-linear_coupling_trajectory_smiley_center_2.py's output).
+Set REFERENCE_PATH below to whichever saved reference file to visualize.
 
 Run with:
     uv run python tests/guidance/visualization/gif_reference_prediction_trajectory_phi_psi.py

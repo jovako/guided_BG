@@ -1,28 +1,17 @@
 """Optuna (TPE) hyperparameter search for the smiley guidance objective, at euler_steps=600.
 
-Same search as hparam_search_smiley_optuna.py (inner_steps=1, init_control=
-"zero", EYE_MOUTH_WEIGHT=15.0; minimize the Wasserstein distance to the
-unguided rejection-sampling baseline subject to frac_in_face >=
-FRAC_IN_FACE_TARGET; TPE sampler, chosen over a GP because the landscape is
-sharply non-smooth -- see that script's docstring), but with EULER_STEPS=600
-instead of 200.
+Same search as hparam_search_smiley_optuna.py (inner_steps=1, EYE_MOUTH_WEIGHT=
+15.0, same objective, TPE sampler), but with EULER_STEPS=600 instead of 200.
 
-Deliberately COLD-STARTED, not warm-started from the euler_steps=200 study:
-this codebase has an existing comment noting lr should scale roughly
-inversely with euler_steps (2e-3 @ 600 steps ~ 1e-2 @ 120 steps), so the
-200-step results' (param -> objective) associations don't transfer directly
--- importing them as-is would tell TPE "lr=0.011 is good" using evidence from
-a run where the dynamics behind that conclusion no longer hold at 3x the
-integration length. The existing BOUNDS already comfortably cover the
-expected lower lr regime (~0.0037, if the inverse-with-steps scaling holds),
-so no bound changes were needed, just skipping the import.
+Cold-started rather than warm-started from the euler_steps=200 study: lr
+scales roughly inversely with euler_steps, so the 200-step (param ->
+objective) associations don't transfer directly.
 
-Runtime note: 600 steps is 3x the network evaluations per trial of the
-euler_steps=200 search, so expect roughly 1/3 the trial throughput for the
-same BUDGET_SECONDS.
+Runtime note: 3x the network evaluations per trial of the euler_steps=200
+search, so expect roughly 1/3 the trial throughput for the same BUDGET_SECONDS.
 
 State persists in an Optuna sqlite study (STUDY_PATH), so re-running this
-script resumes automatically -- no hand-rolled CSV resume logic needed.
+script resumes automatically.
 
 Run with:
     uv run python tests/guidance/hparam_search/hparam_search_smiley_optuna_600steps.py
@@ -44,6 +33,7 @@ from hydra.core.global_hydra import GlobalHydra
 
 from transferable_samplers.evaluation.metrics.wasserstein_distances import energy_wasserstein, torus_wasserstein
 from transferable_samplers.guidance.costs import repel_within_radius_penalty, within_radius_penalty
+from transferable_samplers.guidance.euler_density_integrator import generate_proposal_guided_euler
 from transferable_samplers.guidance.observables import dihedrals, get_dihedral_atom_indices
 from transferable_samplers.utils.chirality import ChiralitySignChecker
 from transferable_samplers.utils.init_resume_utils import resolve_init
@@ -64,7 +54,6 @@ WARM_START_CSV = None  # deliberately cold-started -- see module docstring
 # Fixed, not searched.
 EULER_STEPS = 600
 INNER_STEPS = 1
-INIT_CONTROL = "zero"
 EYE_MOUTH_WEIGHT = 15.0
 GAMMA_THRESHOLD_MAX = 0.32  # ceiling
 GAMMA_THRESHOLD_FLOOR = 0.05
@@ -169,7 +158,10 @@ def make_gamma(params: dict):
 
 
 def make_cost_fn(phi_idx, psi_idx, chirality_checker):
-    def guidance_cost_fn(x1: torch.Tensor) -> torch.Tensor:
+    """Single-sample convention (see make_guided_euler_step): x1_flat is (d,), not batched."""
+
+    def terminal_cost(x1_flat: torch.Tensor, t: torch.Tensor) -> torch.Tensor:
+        x1 = x1_flat.view(1, -1, 3)
         with torch.no_grad():
             flip_mask = chirality_checker.flip_mask(x1)
         sign = torch.where(flip_mask, -1.0, 1.0).to(x1)[:, None, None]
@@ -188,9 +180,9 @@ def make_cost_fn(phi_idx, psi_idx, chirality_checker):
             dist = torch.sqrt((phi - cx) ** 2 + (psi - cy) ** 2)
             cost = cost + EYE_MOUTH_WEIGHT * repel_within_radius_penalty(dist, MOUTH_RADIUS)
 
-        return cost
+        return cost.squeeze()
 
-    return guidance_cost_fn
+    return terminal_cost
 
 
 def float_distribution(low: float, high: float, log: bool = False):
@@ -214,25 +206,22 @@ def objective_value(frac_in_face: float, energy_w2: float, failed: bool) -> floa
 
 
 def run_trial(model, eval_ctx, phi_idx, psi_idx, chirality_checker, num_atoms, device, rejection_data, params: dict) -> dict:
-    model.use_guidance = True
-    model.guidance_cost_fn = make_cost_fn(phi_idx, psi_idx, chirality_checker)
-    model.guidance_num_steps = EULER_STEPS
-    model.guidance_inner_steps = INNER_STEPS
-    model.guidance_gamma = make_gamma(params)
-    model.guidance_lr = params["lr"]
-    model.guidance_w_terminal = params["w_terminal"]
-    model.guidance_w_vf = params["w_vf"]
-    model.guidance_w_control = params["w_control"]
-    model.guidance_init_control = INIT_CONTROL
+    terminal_cost = make_cost_fn(phi_idx, psi_idx, chirality_checker)
+    gamma = make_gamma(params)
 
     torch.manual_seed(SEED)
-    z = model.prior.sample(EVAL_BATCH, num_atoms, device=device)
 
     t0 = time.time()
     result = dict(params)
     try:
-        with torch.no_grad():
-            x = model._integrate_guided(model.net, z, encodings=None)
+        x, _, _ = generate_proposal_guided_euler(
+            model, EVAL_BATCH, num_atoms,
+            lambda x1, t: params["w_terminal"] * terminal_cost(x1, t),
+            gamma=gamma, alpha=params["lr"], lam=params["w_control"], beta=params["w_vf"],
+            n_inner=INNER_STEPS, n_steps=EULER_STEPS,
+            device=device, track_density=False,
+        )
+        x = x.detach()
 
         x_phys = destandardize_coords(x.cpu(), eval_ctx.normalization_std)
         flip_mask = chirality_checker.flip_mask(x_phys)

@@ -1,31 +1,15 @@
 """Unguided rejection-sampling baseline for the "positive phi" constraint.
 
 Reference point for judging guided sampling: draw plain (unguided) samples
-from the model's actual proposal distribution (adaptive dopri5, the accurate
-solver -- not the Euler approximation guidance uses), keep only the ones that
-already satisfy phi > 0, and report the mean target energy of that accepted
-subset. If guidance is not distorting the energy landscape beyond what
-selecting for the constraint already implies, its mean-energy for phi > 0
-samples should land close to this number.
+via dopri5, keep only the ones satisfying phi > 0, report mean target energy
+of that accepted subset.
 
-A Wasserstein distance (energy-w2 or torus-w2) needs the actual per-sample
-values from *both* sides being compared, not a summary statistic -- so this
-saves the accepted samples' coordinates and energies to a .pt file
-(SAMPLES_PATH). To get the distance to a *guided* run specifically (rather
-than each side's distance to the true trajectory, which is all that's
-computed here), load both sides' saved samples and call
-``energy_wasserstein``/``torus_wasserstein`` with one as `pred` and the other
-as `true` -- but note the guided script doesn't save its raw samples yet
-either, only summary metrics; it needs the same treatment before that
-comparison is possible.
+Saves accepted samples' coordinates + energies (not just summary stats) so a
+Wasserstein distance can later be computed directly against a guided run.
 
-Chirality convention matches the other scripts in this directory: energy is
-computed on the samples as generated (chirality-corrected phi is only used to
-decide accept/reject, not to alter the reported energy -- a real chirality
-flip changes essentially no bond lengths/angles, and PeptideEnsembleEvaluator
-doesn't recompute energy after fixing chirality either). The saved/plotted
-coordinates ARE chirality-corrected, though, since those matter for
-torus-w2/Ramachandran geometry.
+Energy is computed on the samples as generated; chirality-corrected phi is
+only used to decide accept/reject. Saved/plotted coordinates ARE
+chirality-corrected (torus-w2/Ramachandran geometry needs that).
 
 Run with:
     uv run python tests/guidance/rejection_baselines/rejection_baseline_positive_phi.py
@@ -53,7 +37,7 @@ from transferable_samplers.utils.standardization import destandardize_coords
 
 TARGET_ACCEPTED = 5000
 BATCH_SIZE = 512
-MAX_BATCHES = 40  # safety cap in case the acceptance rate is much lower than expected
+MAX_BATCHES = 40
 SEED = 42
 SEQUENCE = "Ace-A-Nme"
 OUT_DIR = "tests/guidance/out"
@@ -92,7 +76,7 @@ def main() -> None:
     torch.manual_seed(SEED)
 
     accepted_energy = []
-    accepted_samples_physical = []  # chirality-corrected, for geometry (plot / torus-w2 / reuse)
+    accepted_samples_physical = []  # chirality-corrected
     total_accepted = 0
     total_drawn = 0
     batch_i = 0
@@ -158,9 +142,6 @@ def main() -> None:
         writer.writerows(metrics.items())
     print(f"\nsaved {csv_path}")
 
-    # Save the raw accepted samples + energies (not just summary metrics) so a
-    # future script can compute a Wasserstein distance directly against a
-    # guided run's samples, instead of only each side's distance to the truth.
     torch.save(
         {"samples_physical": accepted_samples_physical, "energy": accepted_energy, "acceptance_rate": acceptance_rate},
         SAMPLES_PATH,

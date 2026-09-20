@@ -1,9 +1,6 @@
 """Second reference trajectory (see linear_coupling_trajectory_smiley_center.py),
-built the same way but with a DIFFERENT rejection sample (the 2nd-closest to
-FACE_CENTER, not the closest) and a different noise seed -- to test whether
-smiley_reference's high failure rate was specific to the first reference
-sample (bad luck / a numerically fragile point) or a general property of the
-reference-tracking approach.
+built the same way but with the 2nd-closest rejection sample to FACE_CENTER
+and a different noise seed.
 
 Run with:
     uv run python tests/guidance/integrator_checks/linear_coupling_trajectory_smiley_center_2.py

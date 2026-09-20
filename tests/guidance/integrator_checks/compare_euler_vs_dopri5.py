@@ -1,15 +1,5 @@
-"""Check that the new fixed-step Euler integrator (used for observable guidance)
-reproduces the same ODE solution as the original adaptive dopri5 solver when
-guidance is turned off.
-
-``FlowMatchingModule._integrate_guided`` replaces the adaptive dopri5 solver
-with a fixed-step Euler loop so a control vector can be optimized at every
-step (see ``guidance_*`` hyperparameters). With ``guidance_inner_steps=0`` the
-inner optimization never runs, so it reduces to a plain Euler integration of
-the *unguided* velocity field -- this script checks that it converges to the
-same trajectory as the original ``_integrate`` (dopri5, atol/rtol=1e-4) as the
-number of Euler steps grows, using the trained ECNF++ checkpoint for alanine
-dipeptide (Ace-A-Nme) and a fixed batch of prior samples.
+"""Check that the guided Euler integrator, with guidance off, reproduces the
+same ODE solution as the adaptive dopri5 solver as the step count grows.
 
 Run with:
     uv run python tests/guidance/integrator_checks/compare_euler_vs_dopri5.py
@@ -22,6 +12,7 @@ import torch
 from hydra import compose, initialize
 from hydra.core.global_hydra import GlobalHydra
 
+from transferable_samplers.guidance.euler_density_integrator import generate_proposal_guided_euler
 from transferable_samplers.utils.init_resume_utils import resolve_init
 
 NUM_SAMPLES = 128
@@ -61,10 +52,13 @@ def main() -> None:
     print(f"reference: dopri5, atol=rtol={model.atol:g}, nfe={model.nfe}\n")
     print(f"{'euler steps':>12} | {'rmse':>12} | {'max abs diff':>14}")
     for num_steps in EULER_STEP_COUNTS:
-        model.guidance_num_steps = num_steps
-        model.guidance_inner_steps = 0  # no guidance -- reduces to plain Euler
-        with torch.no_grad():
-            x_new = model._integrate_guided(model.net, z.clone(), encodings=None)
+        torch.manual_seed(SEED)  # reproduce the same z as above via model.prior.sample(...) internally
+        x_new, _, _ = generate_proposal_guided_euler(
+            model, NUM_SAMPLES, num_atoms, lambda x1, t: (x1 * 0.0).sum(),
+            alpha=0.0, n_inner=0, use_score_deviation=False, beta=0.0, lam=0.0,
+            n_steps=num_steps, device=device, track_density=False,
+        )
+        x_new = x_new.detach()
 
         diff = x_new - x_ref
         rmse = diff.pow(2).mean().sqrt().item()

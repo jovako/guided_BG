@@ -1,23 +1,13 @@
 """Bulk sampling run: draws CHUNKS batches of BATCH exact-density guided-Euler
 samples (smiley objective), saving each chunk to disk as it completes, using
-whichever guidance hyperparameters are CURRENTLY live in
-plot_guided_euler_ramachandran.py (imported directly, not a frozen snapshot --
-unlike sample_smiley_guided_snis_pool.py, which hardcodes the older
-"66%-valid" decay-schedule config). At the time this run was started:
-    OBJECTIVE=smiley, EULER_STEPS=250, constant gamma=2.0 (GAMMA_THRESHOLD=0,
-    GAMMA_USE_DECAY=False), GUIDANCE_LR=0.01, GUIDANCE_W_TERMINAL=1.0.
-Empirically, this config's plain "smiley" cost (no reference-tracking) was
-checked at batch=24 and batch=64 and landed around 87-92% valid
-(orientation-preserving) -- see this session's smiley vs smiley_reference
-comparisons -- so expect a notably higher valid fraction than the older
-pool's ~57%.
+whichever guidance hyperparameters are currently live in
+plot_guided_euler_ramachandran.py (imported directly, not a frozen snapshot,
+unlike sample_smiley_guided_snis_pool.py).
 
-Writes to a SEPARATE pool directory (snis_pool_smiley_current_hparams/) so
-this never mixes with sample_smiley_guided_snis_pool.py's existing
-(different-hyperparameter) pool.
+Writes to a separate pool directory (snis_pool_smiley_current_hparams/) so
+this never mixes with sample_smiley_guided_snis_pool.py's pool.
 
-Resumable: chunks already saved on disk are skipped, so re-running after an
-interruption picks up where it left off.
+Resumable: chunks already saved on disk are skipped.
 
 Run with:
     uv run python tests/guidance/sampling/sample_smiley_current_hparams_pool.py
@@ -58,7 +48,7 @@ from plot_guided_euler_ramachandran import (
 )
 
 BATCH = 128
-CHUNKS = 17  # matches the earlier pool's scale (~71 min/chunk at batch=128, n_steps=250 -> ~20h total)
+CHUNKS = 17
 SEED_BASE = 20_000  # distinct from sample_smiley_guided_snis_pool.py's 10_000
 POOL_DIR = Path(f"{OUT_DIR}/snis_pool_smiley_current_hparams")
 

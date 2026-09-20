@@ -1,42 +1,23 @@
 """Optuna (TPE) hyperparameter search for the smiley guidance objective.
 
 Same fixed settings and objective as hparam_search_smiley_refined.py
-(euler_steps=200, inner_steps=1, init_control="zero", EYE_MOUTH_WEIGHT=15.0;
-minimize the Wasserstein distance to the unguided rejection-sampling
-baseline subject to frac_in_face >= FRAC_IN_FACE_TARGET), but replaces the
-hand-rolled "jitter around the current best" local search with a real
-Bayesian-optimization sampler.
+(euler_steps=200, inner_steps=1, EYE_MOUTH_WEIGHT=15.0; minimize the
+Wasserstein distance to the unguided rejection-sampling baseline subject to
+frac_in_face >= FRAC_IN_FACE_TARGET), searched with Optuna's TPE sampler
+(the landscape is sharply non-smooth, which a GP-style sampler assumes away).
 
-Sampler choice: Optuna's default TPE (Tree-structured Parzen Estimator), not
-a Gaussian process. The landscape here is sharply non-smooth -- small
-parameter changes have been observed to swing energy-w2 by 2-3 orders of
-magnitude (e.g. trial 1 vs trial 0 in the first refined-search run, same
-lr/w_terminal/w_control, only gamma_mode changed: 18.77 -> 10565). A GP's
-kernel assumes smoothness the objective doesn't have; TPE instead models the
-parameter *distributions* of good vs. bad trials non-parametrically, which
-tends to be more robust to this kind of needle-in-a-haystack surface. (Optuna
-does have a GP-backed sampler too -- optuna.integration.SkoptSampler,
-wrapping scikit-optimize's gp_minimize -- if you want to compare.)
+The frac_in_face constraint is handled by penalizing a single-objective
+value rather than Optuna's constraint machinery:
+    objective = log1p(energy_w2)                if qualifying
+    objective = log1p(1e5 + violation * 1e6)    if frac_in_face < target
+    objective = log1p(1e7)                       if the trial crashed
 
-The constraint (frac_in_face >= target) is handled by penalizing the
-objective rather than Optuna's native multi-objective/constraint machinery,
-to keep this a simple, robust single-objective TPE search:
-    objective = log1p(energy_w2)                              if qualifying
-    objective = log1p(1e5 + violation * 1e6)                  if ran but frac_in_face < target
-    objective = log1p(1e7)                                     if the trial crashed
-The log1p keeps the wildly-varying raw values (0.1 to >1e9 observed) in a
-sane range for TPE's internal density estimation.
-
-Warm start: every valid trial from hparam_search_smiley_refined_results.csv
-(158 already-spent GPU/OpenMM evaluations) is imported as a completed Optuna
-trial before any new evaluation runs, via optuna.trial.create_trial --
-excluding the ~46 rows recorded before the gamma_threshold ceiling bug was
-fixed (threshold > 0.32 was, at the time, the wrong regime being explored
-under a since-corrected constraint, so those are a different search space,
-not just more data for this one).
+Warm-starts from hparam_search_smiley_refined_results.csv (imported as
+completed Optuna trials via optuna.trial.create_trial), excluding rows from
+a since-corrected gamma_threshold range.
 
 State persists in an Optuna sqlite study (STUDY_PATH), so re-running this
-script resumes automatically -- no hand-rolled CSV resume logic needed.
+script resumes automatically.
 
 Run with:
     uv run python tests/guidance/hparam_search/hparam_search_smiley_optuna.py
@@ -58,6 +39,7 @@ from hydra.core.global_hydra import GlobalHydra
 
 from transferable_samplers.evaluation.metrics.wasserstein_distances import energy_wasserstein, torus_wasserstein
 from transferable_samplers.guidance.costs import repel_within_radius_penalty, within_radius_penalty
+from transferable_samplers.guidance.euler_density_integrator import generate_proposal_guided_euler
 from transferable_samplers.guidance.observables import dihedrals, get_dihedral_atom_indices
 from transferable_samplers.utils.chirality import ChiralitySignChecker
 from transferable_samplers.utils.init_resume_utils import resolve_init
@@ -78,17 +60,12 @@ WARM_START_CSV = f"{OUT_DIR}/hparam_search_smiley_refined_results.csv"
 # Fixed, not searched (same as hparam_search_smiley_refined.py).
 EULER_STEPS = 200
 INNER_STEPS = 1
-INIT_CONTROL = "zero"
 EYE_MOUTH_WEIGHT = 15.0
 GAMMA_THRESHOLD_MAX = 0.32  # ceiling
 GAMMA_THRESHOLD_FLOOR = 0.05
 REJECTION_SAMPLES_PATH = f"{OUT_DIR}/rejection_smiley_samples.pt"
 
-# Search space bounds -- checked against hparam_search_smiley_refined_results.csv's
-# actual explored ranges (gamma_hi [1.03,4.75], gamma_lo_slope [0.21,1.99],
-# gamma_threshold [0.08,0.32] once the >0.32 rows are excluded, gamma_value
-# [0.65,4.82], lr [0.0035,0.027], w_terminal [10,84], w_control [0.0001,0.017])
-# with margin for the search to move beyond what's already been tried.
+# Search space bounds, with margin beyond what hparam_search_smiley_refined.py explored.
 BOUNDS = {
     "gamma_value": (0.3, 6.0),
     "gamma_hi": (0.8, 6.0),
@@ -179,7 +156,8 @@ def make_gamma(params: dict):
 
 
 def make_cost_fn(phi_idx, psi_idx, chirality_checker):
-    def guidance_cost_fn(x1: torch.Tensor) -> torch.Tensor:
+    def terminal_cost(x1_flat: torch.Tensor, t: torch.Tensor) -> torch.Tensor:
+        x1 = x1_flat.view(1, -1, 3)
         with torch.no_grad():
             flip_mask = chirality_checker.flip_mask(x1)
         sign = torch.where(flip_mask, -1.0, 1.0).to(x1)[:, None, None]
@@ -198,9 +176,9 @@ def make_cost_fn(phi_idx, psi_idx, chirality_checker):
             dist = torch.sqrt((phi - cx) ** 2 + (psi - cy) ** 2)
             cost = cost + EYE_MOUTH_WEIGHT * repel_within_radius_penalty(dist, MOUTH_RADIUS)
 
-        return cost
+        return cost.squeeze()
 
-    return guidance_cost_fn
+    return terminal_cost
 
 
 def float_distribution(low: float, high: float, log: bool = False):
@@ -224,25 +202,22 @@ def objective_value(frac_in_face: float, energy_w2: float, failed: bool) -> floa
 
 
 def run_trial(model, eval_ctx, phi_idx, psi_idx, chirality_checker, num_atoms, device, rejection_data, params: dict) -> dict:
-    model.use_guidance = True
-    model.guidance_cost_fn = make_cost_fn(phi_idx, psi_idx, chirality_checker)
-    model.guidance_num_steps = EULER_STEPS
-    model.guidance_inner_steps = INNER_STEPS
-    model.guidance_gamma = make_gamma(params)
-    model.guidance_lr = params["lr"]
-    model.guidance_w_terminal = params["w_terminal"]
-    model.guidance_w_vf = params["w_vf"]
-    model.guidance_w_control = params["w_control"]
-    model.guidance_init_control = INIT_CONTROL
+    terminal_cost = make_cost_fn(phi_idx, psi_idx, chirality_checker)
+    gamma = make_gamma(params)
 
     torch.manual_seed(SEED)
-    z = model.prior.sample(EVAL_BATCH, num_atoms, device=device)
 
     t0 = time.time()
     result = dict(params)
     try:
-        with torch.no_grad():
-            x = model._integrate_guided(model.net, z, encodings=None)
+        x, _, _ = generate_proposal_guided_euler(
+            model, EVAL_BATCH, num_atoms,
+            lambda x1, t: params["w_terminal"] * terminal_cost(x1, t),
+            gamma=gamma, alpha=params["lr"], lam=params["w_control"], beta=params["w_vf"],
+            n_inner=INNER_STEPS, n_steps=EULER_STEPS,
+            device=device, track_density=False,
+        )
+        x = x.detach()
 
         x_phys = destandardize_coords(x.cpu(), eval_ctx.normalization_std)
         flip_mask = chirality_checker.flip_mask(x_phys)
@@ -299,9 +274,8 @@ def run_trial(model, eval_ctx, phi_idx, psi_idx, chirality_checker, num_atoms, d
 def load_warm_start_trials() -> list[tuple[dict, dict, float]]:
     """Load hparam_search_smiley_refined_results.csv as (params, distributions, value) tuples.
 
-    Excludes schedule rows with gamma_threshold > GAMMA_THRESHOLD_MAX + eps --
-    those were recorded before the ceiling-vs-floor bug was fixed and explored
-    a since-abandoned region, not just more data for the current space.
+    Excludes schedule rows with gamma_threshold > GAMMA_THRESHOLD_MAX + eps
+    (a since-abandoned search region).
     """
     if not Path(WARM_START_CSV).exists():
         print(f"No warm-start CSV found at {WARM_START_CSV}, starting cold.")
@@ -322,7 +296,7 @@ def load_warm_start_trials() -> list[tuple[dict, dict, float]]:
                     if threshold > GAMMA_THRESHOLD_MAX + 1e-6:
                         skipped += 1
                         continue
-                    threshold = min(threshold, GAMMA_THRESHOLD_MAX)  # fold trial-35's tiny float overshoot back in
+                    threshold = min(threshold, GAMMA_THRESHOLD_MAX)  # clamp tiny float overshoot
                     params = {
                         "gamma_hi": float(row["gamma_hi"]),
                         "gamma_lo_slope": float(row["gamma_lo_slope"]),

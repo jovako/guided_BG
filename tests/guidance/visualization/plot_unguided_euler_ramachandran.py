@@ -1,19 +1,11 @@
 """Sanity check for the unguided fixed-step Euler integrator on alanine dipeptide.
 
-Checks that the new Euler integration path used for guidance
-(``FlowMatchingModule._integrate_guided`` with ``guidance_inner_steps=0``, i.e.
-no guidance) produces a physically sensible equilibrium distribution on its
-own -- no SNIS/importance-weighting (no ``logw``, no effective-sample-size),
-just raw proposal samples from the ECNF++ model straight off the Euler solver.
+Checks that ``generate_proposal_guided_euler`` with guidance off (alpha=0,
+n_inner=0) produces a physically sensible equilibrium distribution: no
+SNIS/importance-weighting, just raw proposal samples off the Euler solver.
 
-Reports:
-    - mean target energy (OpenMM force-field energy of the generated
-      conformations -- independent of the model's own log-density, which we
-      don't track for the guided/Euler path; only importance-weighted metrics
-      like ESS would need that)
-    - energy-W2 to the true trajectory's energy distribution
-    - torus-W2 on phi/psi to the true trajectory
-    - a Ramachandran plot
+Reports mean target energy, energy-W2 and torus-W2 to the true trajectory,
+and a Ramachandran plot.
 
 Run with:
     uv run python tests/guidance/visualization/plot_unguided_euler_ramachandran.py
@@ -32,6 +24,7 @@ from hydra.core.global_hydra import GlobalHydra
 
 from transferable_samplers.evaluation.metrics.wasserstein_distances import energy_wasserstein, torus_wasserstein
 from transferable_samplers.evaluation.plots.plot_ramachandran import plot_ramachandran
+from transferable_samplers.guidance.euler_density_integrator import generate_proposal_guided_euler
 from transferable_samplers.utils.chirality import get_symmetry_change
 from transferable_samplers.utils.init_resume_utils import resolve_init
 from transferable_samplers.utils.standardization import destandardize_coords
@@ -73,18 +66,17 @@ def main() -> None:
 
     eval_ctx = datamodule.prepare_eval(sequence=SEQUENCE, stage="test")
 
-    model.guidance_num_steps = EULER_STEPS
-    model.guidance_inner_steps = 0  # no guidance -- reduces to plain Euler
-
     torch.manual_seed(SEED)
     samples = []
     num_batches = (NUM_SAMPLES + BATCH_SIZE - 1) // BATCH_SIZE
     for i in range(num_batches):
         n = min(BATCH_SIZE, NUM_SAMPLES - i * BATCH_SIZE)
-        z = model.prior.sample(n, num_atoms, device=device)
-        with torch.no_grad():
-            #x = model._integrate(model.net, z, encodings=None, compute_dlogp=False)[0]
-            x = model._integrate_guided(model.net, z, encodings=None)
+        x, _, _ = generate_proposal_guided_euler(
+            model, n, num_atoms, lambda x1, t: (x1 * 0.0).sum(),
+            alpha=0.0, n_inner=0, use_score_deviation=False, beta=0.0, lam=0.0,
+            n_steps=EULER_STEPS, device=device, track_density=False,
+        )
+        x = x.detach()
         samples.append(x.cpu())
         print(f"batch {i + 1}/{num_batches} done ({sum(s.shape[0] for s in samples)}/{NUM_SAMPLES} samples)")
 
@@ -96,10 +88,7 @@ def main() -> None:
 
     samples_physical = destandardize_coords(samples, eval_ctx.normalization_std)
 
-    # EGNN is reflection-equivariant, so some samples come out as the wrong
-    # (mirror-image) enantiomer -- flip them back to match the true chirality,
-    # same as PeptideEnsembleEvaluator._fix_chirality does. Otherwise the
-    # Ramachandran plot shows a spurious point-reflected population.
+    # Flip mirror-image (wrong-chirality) samples to match the true reference.
     flip_mask = get_symmetry_change(eval_ctx.true_data.samples, samples_physical, eval_ctx.topology)
     print(f"chirality: flipped {flip_mask.float().mean():.1%} of samples to match the true reference")
     samples_physical = samples_physical.clone()

@@ -183,6 +183,10 @@ ___*.py
 !docs/*.html
 CLAUDE.md
 
+# Docs assets (exempt from the blanket *.png/*.gif ignore rules above)
+!docs/assets/**
+!docs/assets/**/
+
 df_cache/*
 NOTES/*
 

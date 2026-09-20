@@ -1,33 +1,14 @@
-"""Refined smiley guidance search around trial 35 of hparam_search.py.
+"""Refined smiley guidance search, fixing euler_steps=200, inner_steps=1 and
+varying gamma (constant, or a two-piece schedule: hi if t > threshold else
+lo_slope * t, threshold <= 0.32), lr, w_terminal, w_control, w_vf.
 
-Fixes euler_steps=200, inner_steps=1, init_control="zero" (causal_zero was
-conclusively bad across the whole first search -- 0/236 qualifying trials,
-regardless of steps/inner_steps -- so it's excluded here rather than
-re-explored) and carefully varies the remaining guidance knobs around trial
-35's known-good config:
-    euler_steps=200 inner=1 init=zero gamma_hi=1.90 gamma_lo_slope=0.52
-    gamma_threshold=0.32 lr=0.0144 w_terminal=39.2 w_control=0.0065 w_vf=0.0
-    -> frac_in_face=1.0, energy-w2 (vs true trajectory)=19.67
+Objective: minimize the Wasserstein distance between guided samples and the
+already-generated unguided rejection-sampling baseline for the smiley
+constraint (rejection_baseline_smiley.py's saved samples+energies) subject
+to frac_in_face >= 0.98 -- the direct "is guidance good" comparison, rather
+than each side's separate distance to the unconstrained true trajectory.
 
-Two gamma parametrizations are both tried per instruction ("also try constant
-gamma_ts"): a plain constant, or the two-piece schedule
-(hi if t > threshold else lo_slope * t) -- with gamma_threshold constrained
-to <= 0.32 (explicit ceiling from instruction; an earlier version of this
-script had it backwards as a floor, which is why some of the first ~75
-trials in the results CSV sit right at the 0.32 boundary from below).
-
-Objective (different from the original search!): minimize the Wasserstein
-distance between the guided samples and the ALREADY-GENERATED unguided
-rejection-sampling baseline for the smiley constraint
-(rejection_baseline_smiley.py's saved samples+energies, 500 accepted, 10.1%
-acceptance rate) -- the direct "is guidance good" comparison against samples
-that already satisfy the same constraint, rather than each side's separate
-distance to the unconstrained true trajectory -- subject to
-frac_in_face >= 0.98.
-
-EYE_MOUTH_WEIGHT is fixed at 15.0, matching hparam_search.py and trial 35
-(plot_guided_euler_ramachandran.py currently uses 5.0 -- kept at 15.0 here
-for direct comparability with the original search's results).
+EYE_MOUTH_WEIGHT is fixed at 15.0, matching hparam_search.py.
 
 Run with:
     uv run python tests/guidance/hparam_search/hparam_search_smiley_refined.py
@@ -49,6 +30,7 @@ from hydra.core.global_hydra import GlobalHydra
 
 from transferable_samplers.evaluation.metrics.wasserstein_distances import energy_wasserstein, torus_wasserstein
 from transferable_samplers.guidance.costs import repel_within_radius_penalty, within_radius_penalty
+from transferable_samplers.guidance.euler_density_integrator import generate_proposal_guided_euler
 from transferable_samplers.guidance.observables import dihedrals, get_dihedral_atom_indices
 from transferable_samplers.utils.chirality import ChiralitySignChecker
 from transferable_samplers.utils.init_resume_utils import resolve_init
@@ -68,7 +50,6 @@ REJECTION_SAMPLES_PATH = f"{OUT_DIR}/rejection_smiley_samples.pt"
 # Fixed, not searched.
 EULER_STEPS = 200
 INNER_STEPS = 1
-INIT_CONTROL = "zero"
 EYE_MOUTH_WEIGHT = 15.0
 GAMMA_THRESHOLD_MAX = 0.32  # ceiling, not floor -- corrected after an earlier misstatement
 GAMMA_THRESHOLD_FLOOR = 0.05  # avoid the near-degenerate threshold~0 regime
@@ -152,7 +133,10 @@ def make_gamma(params: dict):
 
 
 def make_cost_fn(phi_idx, psi_idx, chirality_checker):
-    def guidance_cost_fn(x1: torch.Tensor) -> torch.Tensor:
+    """Single-sample convention (see make_guided_euler_step): x1_flat is (d,), not batched."""
+
+    def terminal_cost(x1_flat: torch.Tensor, t: torch.Tensor) -> torch.Tensor:
+        x1 = x1_flat.view(1, -1, 3)
         with torch.no_grad():
             flip_mask = chirality_checker.flip_mask(x1)
         sign = torch.where(flip_mask, -1.0, 1.0).to(x1)[:, None, None]
@@ -171,14 +155,12 @@ def make_cost_fn(phi_idx, psi_idx, chirality_checker):
             dist = torch.sqrt((phi - cx) ** 2 + (psi - cy) ** 2)
             cost = cost + EYE_MOUTH_WEIGHT * repel_within_radius_penalty(dist, MOUTH_RADIUS)
 
-        return cost
+        return cost.squeeze()
 
-    return guidance_cost_fn
+    return terminal_cost
 
 
 def sample_params(rng: random.Random) -> dict:
-    # Roughly 1/3 constant gamma, 2/3 schedule (trial 35 was a schedule; still
-    # want a real chance at the qualitatively different constant regime).
     mode = rng.choice(["schedule", "schedule", "constant"])
     if mode == "constant":
         gamma_value = 10 ** rng.uniform(-0.3, 0.7)  # ~0.5 to 5.0
@@ -203,23 +185,14 @@ def sample_params(rng: random.Random) -> dict:
 
 
 def _jitter(rng: random.Random, value: float, spread: float = 0.15) -> float:
-    """Multiplicative log-uniform jitter: value * 10**U(-spread, spread).
-
-    spread=0.15 -> roughly a 0.7x-1.4x swing (a "small step"), vs. sample_params'
-    multi-decade wide draws.
-    """
+    """Multiplicative log-uniform jitter: value * 10**U(-spread, spread)."""
     return value * 10 ** rng.uniform(-spread, spread)
 
 
 def sample_params_local(rng: random.Random, best: dict | None, explore_prob: float = 0.15) -> dict:
-    """Small perturbation around the current best qualifying trial.
-
-    Keeps best's gamma_mode and nudges every numeric parameter by a small
-    multiplicative factor, rather than sample_params' wide independent
-    redraws -- once we have a strong anchor, wide resampling mostly just
-    lands far away in a landscape we've seen is very sensitive to these
-    parameters. Occasionally (explore_prob) still takes a fresh wide draw so
-    the search doesn't get stuck if the local neighborhood is a dead end.
+    """Small multiplicative perturbation around the current best qualifying
+    trial, keeping its gamma_mode. Occasionally (explore_prob) takes a fresh
+    wide draw instead so the search doesn't get stuck in a local dead end.
     """
     if best is None or rng.random() < explore_prob:
         return sample_params(rng)
@@ -247,7 +220,7 @@ def sample_params_local(rng: random.Random, best: dict | None, explore_prob: flo
 
 
 def seeded_trials() -> list[dict]:
-    """Trial 35 itself, plus its gamma_hi as a constant, as anchors/sanity checks."""
+    """A known-good config, plus its gamma_hi as a constant, as anchors/sanity checks."""
     return [
         {
             "gamma_mode": "schedule",
@@ -275,25 +248,22 @@ def seeded_trials() -> list[dict]:
 
 
 def run_trial(model, eval_ctx, phi_idx, psi_idx, chirality_checker, num_atoms, device, rejection_data, params: dict) -> dict:
-    model.use_guidance = True
-    model.guidance_cost_fn = make_cost_fn(phi_idx, psi_idx, chirality_checker)
-    model.guidance_num_steps = EULER_STEPS
-    model.guidance_inner_steps = INNER_STEPS
-    model.guidance_gamma = make_gamma(params)
-    model.guidance_lr = params["lr"]
-    model.guidance_w_terminal = params["w_terminal"]
-    model.guidance_w_vf = params["w_vf"]
-    model.guidance_w_control = params["w_control"]
-    model.guidance_init_control = INIT_CONTROL
+    terminal_cost = make_cost_fn(phi_idx, psi_idx, chirality_checker)
+    gamma = make_gamma(params)
 
     torch.manual_seed(SEED)
-    z = model.prior.sample(EVAL_BATCH, num_atoms, device=device)
 
     t0 = time.time()
     result = dict(params)
     try:
-        with torch.no_grad():
-            x = model._integrate_guided(model.net, z, encodings=None)
+        x, _, _ = generate_proposal_guided_euler(
+            model, EVAL_BATCH, num_atoms,
+            lambda x1, t: params["w_terminal"] * terminal_cost(x1, t),
+            gamma=gamma, alpha=params["lr"], lam=params["w_control"], beta=params["w_vf"],
+            n_inner=INNER_STEPS, n_steps=EULER_STEPS,
+            device=device, track_density=False,
+        )
+        x = x.detach()
 
         x_phys = destandardize_coords(x.cpu(), eval_ctx.normalization_std)
         flip_mask = chirality_checker.flip_mask(x_phys)

@@ -1,22 +1,8 @@
 """Optuna (TPE) hyperparameter search: 100 Euler steps, 1 inner step, constant gamma.
 
-Same objective as hparam_search_smiley_optuna.py (minimize the Wasserstein
-distance to the unguided rejection-sampling baseline subject to
-frac_in_face >= FRAC_IN_FACE_TARGET), but a smaller, cheaper regime:
-    - euler_steps=100 (vs 200/600 in the other searches)
-    - inner_steps=1
-    - gamma is constant in t (no two-piece schedule)
-    - guidance_w_vf=0, guidance_w_control=0 (both terms disabled)
-    - guidance_optimizer="gd" (plain gradient descent w/ elementwise
-      abs-normalized gradient: u_t -= lr * grad / (grad.abs() + 1e-8), i.e.
-      each coordinate moves by roughly lr * sign(grad) -- close to Adam's
-      own bias-corrected first-step behavior, which is presumably why the
-      user found this gd variant does similarly well or better than Adam
-      directly at Adam's best hyperparameters; not Adam)
-Searched: lr, gamma_value, w_terminal -- seeded from and centered on the
-best trial found by the earlier mixed adam/gd 100-step search (adam,
-gamma_value=1.953, lr=0.01995, w_terminal=31.1, frac_in_face=1.000,
-energy_w2=7.531), since gd here is expected to behave similarly.
+Same objective as hparam_search_smiley_optuna.py, but a smaller, cheaper
+regime: euler_steps=100, gamma constant in t (no schedule), w_vf=0, w_control=0.
+Searched: lr, gamma_value, w_terminal.
 
 State persists in its own Optuna sqlite study, so re-running this script
 resumes automatically.
@@ -41,6 +27,7 @@ from hydra.core.global_hydra import GlobalHydra
 
 from transferable_samplers.evaluation.metrics.wasserstein_distances import energy_wasserstein, torus_wasserstein
 from transferable_samplers.guidance.costs import repel_within_radius_penalty, within_radius_penalty
+from transferable_samplers.guidance.euler_density_integrator import generate_proposal_guided_euler
 from transferable_samplers.guidance.observables import dihedrals, get_dihedral_atom_indices
 from transferable_samplers.utils.chirality import ChiralitySignChecker
 from transferable_samplers.utils.init_resume_utils import resolve_init
@@ -57,26 +44,20 @@ STUDY_NAME = "smiley_100steps_constant_gd_absnorm"
 STUDY_PATH = f"sqlite:///{OUT_DIR}/hparam_search_smiley_optuna_100steps_constant_gd_absnorm.db"
 CSV_PATH = f"{OUT_DIR}/hparam_search_smiley_optuna_100steps_constant_gd_absnorm_results.csv"
 
-# Best trial found by the earlier mixed adam/gd 100-step search (trial 31,
-# adam): gamma_value=1.953, lr=0.01995, w_terminal=31.1, frac_in_face=1.000,
-# energy_w2=7.531. The user confirmed the current gd implementation
-# (elementwise abs-normalized gradient) does similarly or better than Adam
-# directly at these values, so it's seeded here verbatim (lr included).
-ADAM_SEED_PARAMS = {"gamma_value": 1.953, "lr": 0.01995, "w_terminal": 31.1}
+# Seed: best trial from an earlier 100-step search.
+SEED_PARAMS = {"gamma_value": 1.953, "lr": 0.01995, "w_terminal": 31.1}
 
 # Fixed, not searched.
 EULER_STEPS = 100
 INNER_STEPS = 1
-INIT_CONTROL = "zero"
 EYE_MOUTH_WEIGHT = 15.0
 W_VF = 0.0
 W_CONTROL = 0.0
-GUIDANCE_OPTIMIZER = "gd"
 REJECTION_SAMPLES_PATH = f"{OUT_DIR}/rejection_smiley_samples.pt"
 
 BOUNDS = {
     "gamma_value": (0.3, 6.0),
-    "lr": (0.004, 0.1),  # centered around the adam-best 0.01995
+    "lr": (0.004, 0.1),
     "w_terminal": (5.0, 200.0),
 }
 
@@ -142,7 +123,10 @@ def load_model_and_data():
 
 
 def make_cost_fn(phi_idx, psi_idx, chirality_checker):
-    def guidance_cost_fn(x1: torch.Tensor) -> torch.Tensor:
+    """Single-sample convention (see make_guided_euler_step): x1_flat is (d,), not batched."""
+
+    def terminal_cost(x1_flat: torch.Tensor, t: torch.Tensor) -> torch.Tensor:
+        x1 = x1_flat.view(1, -1, 3)
         with torch.no_grad():
             flip_mask = chirality_checker.flip_mask(x1)
         sign = torch.where(flip_mask, -1.0, 1.0).to(x1)[:, None, None]
@@ -161,9 +145,9 @@ def make_cost_fn(phi_idx, psi_idx, chirality_checker):
             dist = torch.sqrt((phi - cx) ** 2 + (psi - cy) ** 2)
             cost = cost + EYE_MOUTH_WEIGHT * repel_within_radius_penalty(dist, MOUTH_RADIUS)
 
-        return cost
+        return cost.squeeze()
 
-    return guidance_cost_fn
+    return terminal_cost
 
 
 def objective_value(frac_in_face: float, energy_w2: float, failed: bool) -> float:
@@ -178,26 +162,21 @@ def objective_value(frac_in_face: float, energy_w2: float, failed: bool) -> floa
 
 
 def run_trial(model, eval_ctx, phi_idx, psi_idx, chirality_checker, num_atoms, device, rejection_data, params: dict) -> dict:
-    model.use_guidance = True
-    model.guidance_cost_fn = make_cost_fn(phi_idx, psi_idx, chirality_checker)
-    model.guidance_num_steps = EULER_STEPS
-    model.guidance_inner_steps = INNER_STEPS
-    model.guidance_gamma = params["gamma_value"]
-    model.guidance_lr = params["lr"]
-    model.guidance_optimizer = GUIDANCE_OPTIMIZER
-    model.guidance_w_terminal = params["w_terminal"]
-    model.guidance_w_vf = W_VF
-    model.guidance_w_control = W_CONTROL
-    model.guidance_init_control = INIT_CONTROL
+    terminal_cost = make_cost_fn(phi_idx, psi_idx, chirality_checker)
 
     torch.manual_seed(SEED)
-    z = model.prior.sample(EVAL_BATCH, num_atoms, device=device)
 
     t0 = time.time()
     result = dict(params)
     try:
-        with torch.no_grad():
-            x = model._integrate_guided(model.net, z, encodings=None)
+        x, _, _ = generate_proposal_guided_euler(
+            model, EVAL_BATCH, num_atoms,
+            lambda x1, t: params["w_terminal"] * terminal_cost(x1, t),
+            gamma=params["gamma_value"], alpha=params["lr"], lam=W_CONTROL, beta=W_VF,
+            n_inner=INNER_STEPS, n_steps=EULER_STEPS,
+            device=device, track_density=False,
+        )
+        x = x.detach()
 
         x_phys = destandardize_coords(x.cpu(), eval_ctx.normalization_std)
         flip_mask = chirality_checker.flip_mask(x_phys)
@@ -273,8 +252,8 @@ def main() -> None:
         sampler=optuna.samplers.TPESampler(seed=0),
     )
     if len(study.trials) == 0:
-        study.enqueue_trial(ADAM_SEED_PARAMS)
-        print(f"Starting cold, seeded with adam's best trial: {ADAM_SEED_PARAMS}")
+        study.enqueue_trial(SEED_PARAMS)
+        print(f"Starting cold, seeded with: {SEED_PARAMS}")
     else:
         print(f"Study has {len(study.trials)} trials already recorded.")
 

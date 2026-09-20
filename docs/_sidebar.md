@@ -1,5 +1,6 @@
 - [Home](/)
 - [Usage](usage.md)
 - [Design](design.md)
+- [Guidance](guidance.md)
 - [Paper Reproduction](paper-reproduction.md)
 - [Contributing](contributing.md)

@@ -1,32 +1,19 @@
-"""Combine the current-hparams pool's 17 chunk files into one dataset, adding
+"""Combine the current-hparams pool's chunk files into one dataset, adding
 the smiley-region membership mask and the combined target energy needed for
 SNIS reweighting.
 
 Sibling of prepare_snis_target_energy.py, pointed at the pool written by
-sample_smiley_current_hparams_pool.py (tests/guidance/out/snis_pool_smiley_current_hparams/)
-instead of the older frozen-hparams pool -- kept as a separate script (rather
-than parametrizing the original) to match that script's own precedent of one
-script per pool/run.
+sample_smiley_current_hparams_pool.py instead of the frozen-hparams pool.
 
-"Filtering" here means MARKING which samples fall inside the smiley region
-(within FACE_RADIUS of FACE_CENTER, outside every eye/mouth circle) via a
-boolean mask -- nothing is discarded. Every sample from every chunk is kept
-in the saved output; downstream code subsets with `in_smiley_mask` and/or
-`valid` (orientation-preserving, from the exact-density integrator) as needed.
+Nothing is discarded -- every sample is kept, with a boolean `in_smiley_mask`
+for downstream subsetting alongside `valid` (orientation-preserving).
 
-Target energy: reweighting the guided pool with just the original
-(unconstrained) MD energy would undo the guidance and recover the
-unconstrained equilibrium ensemble, not the smiley-constrained one. Adding
-the smiley cost function's own potential (zero inside the region, growing
-outside) gives:
-
-    energy_combined = energy_md + smiley_cost
-
-which matches the true MD energy exactly for samples inside the region
-(cost=0 there) and heavily penalizes straying outside it, so
-`logw = neg_logq - energy_combined` (the usual SNIS convention, see
-snis_sampler.py's `logw = E_source - E_target`) reweights toward the
-constrained distribution instead of the unconstrained one.
+Reweighting with just the original (unconstrained) MD energy would undo the
+guidance and recover the unconstrained equilibrium ensemble. Adding the
+smiley cost function's own potential (zero inside the region, growing
+outside) instead gives `energy_combined = energy_md + smiley_cost`, so
+`logw = neg_logq - energy_combined` reweights toward the constrained
+distribution.
 
 Run with:
     uv run python tests/guidance/sampling/prepare_snis_target_energy_current_hparams.py

@@ -1,27 +1,14 @@
 """Coarse random hyperparameter search for the smiley guidance objective.
 
-Searches ``FlowMatchingModule``'s guidance hyperparameters (euler steps,
-inner steps, control init scheme, gamma schedule, lr, terminal/vf/control
-weights). EYE_MOUTH_WEIGHT is fixed, not searched -- it's part of the shape
-specification (how firmly the eyes/mouth holes are enforced), not a
-guidance-algorithm hyperparameter. Looking for settings that:
-    - hit >= FRAC_IN_FACE_TARGET (default 0.99) fraction of samples inside
-      the face circle (the containment constraint), while
-    - minimizing energy-w2 to the true (unguided) trajectory -- i.e. staying
-      as close as possible to the unguided baseline while still satisfying
-      the face constraint.
+Searches euler steps, inner steps, gamma schedule, lr, terminal/vf/control
+weights. Looking for settings that hit >= FRAC_IN_FACE_TARGET fraction of
+samples inside the face circle while minimizing energy-w2 to the true
+(unguided) trajectory.
 
-This is a random search (not a grid -- the joint space is too large), run
-under a wall-clock time budget (``BUDGET_SECONDS``). A handful of trials at
-the front specifically test inner_steps=1 with causal_zero init. Every
-trial's result is appended to a CSV immediately (so progress survives an
-early stop), and a small best-so-far summary is rewritten after every trial.
-Non-finite OpenMM energies (unphysical geometry from aggressive guidance)
-are caught per-trial and recorded as failed rather than crashing the search.
-
-Only ever writes small CSV rows -- no per-trial samples or plots are saved,
-to avoid using meaningful disk space during a long unattended run. Free disk
-space on ``/`` is checked periodically as a safety net.
+Random search under a wall-clock budget (``BUDGET_SECONDS``); each trial's
+result is appended to a CSV immediately, and a best-so-far summary is
+rewritten periodically. Non-finite OpenMM energies are caught per-trial and
+recorded as failed rather than crashing the search.
 
 Run with:
     uv run python tests/guidance/hparam_search/hparam_search.py
@@ -43,6 +30,7 @@ from hydra.core.global_hydra import GlobalHydra
 
 from transferable_samplers.evaluation.metrics.wasserstein_distances import energy_wasserstein, torus_wasserstein
 from transferable_samplers.guidance.costs import repel_within_radius_penalty, within_radius_penalty
+from transferable_samplers.guidance.euler_density_integrator import generate_proposal_guided_euler
 from transferable_samplers.guidance.observables import dihedrals, get_dihedral_atom_indices
 from transferable_samplers.utils.chirality import ChiralitySignChecker
 from transferable_samplers.utils.init_resume_utils import resolve_init
@@ -92,7 +80,6 @@ FIELDNAMES = [
     "trial_idx",
     "euler_steps",
     "inner_steps",
-    "init_control",
     "gamma_hi",
     "gamma_lo_slope",
     "gamma_threshold",
@@ -139,7 +126,10 @@ def make_gamma_fn(hi: float, lo_slope: float, threshold: float):
 
 
 def make_cost_fn(phi_idx, psi_idx, chirality_checker, eye_mouth_weight: float):
-    def guidance_cost_fn(x1: torch.Tensor) -> torch.Tensor:
+    """Single-sample convention (see make_guided_euler_step): x1_flat is (d,), not batched."""
+
+    def terminal_cost(x1_flat: torch.Tensor, t: torch.Tensor) -> torch.Tensor:
+        x1 = x1_flat.view(1, -1, 3)
         with torch.no_grad():
             flip_mask = chirality_checker.flip_mask(x1)
         sign = torch.where(flip_mask, -1.0, 1.0).to(x1)[:, None, None]
@@ -158,16 +148,15 @@ def make_cost_fn(phi_idx, psi_idx, chirality_checker, eye_mouth_weight: float):
             dist = torch.sqrt((phi - cx) ** 2 + (psi - cy) ** 2)
             cost = cost + eye_mouth_weight * repel_within_radius_penalty(dist, MOUTH_RADIUS)
 
-        return cost
+        return cost.squeeze()
 
-    return guidance_cost_fn
+    return terminal_cost
 
 
 def sample_params(rng: random.Random) -> dict:
     return {
         "euler_steps": rng.choice([100, 150, 200, 250, MAX_EULER_STEPS]),
         "inner_steps": rng.choice([1, 1, 2, 3, 4]),
-        "init_control": rng.choice(["zero", "causal_zero"]),
         "gamma_hi": 10 ** rng.uniform(0.0, 1.0),
         "gamma_lo_slope": 10 ** rng.uniform(-0.3, 0.7),
         "gamma_threshold": rng.uniform(0.3, 0.8),
@@ -179,7 +168,7 @@ def sample_params(rng: random.Random) -> dict:
 
 
 def forced_trials() -> list[dict]:
-    """A few trials targeting the inner_steps=1 + causal_zero hypothesis up front."""
+    """A few inner_steps=1 trials to run up front, before the random search."""
     trials = []
     for gamma_hi in [3.0, 5.0, 8.0]:
         for lr in [5e-3, 1e-2, 2e-2]:
@@ -187,7 +176,6 @@ def forced_trials() -> list[dict]:
                 {
                     "euler_steps": 200,
                     "inner_steps": 1,
-                    "init_control": "causal_zero",
                     "gamma_hi": gamma_hi,
                     "gamma_lo_slope": 2.0,
                     "gamma_threshold": 0.6,
@@ -201,26 +189,23 @@ def forced_trials() -> list[dict]:
 
 
 def run_trial(model, eval_ctx, phi_idx, psi_idx, chirality_checker, num_atoms, device, params: dict) -> dict:
-    model.use_guidance = True
-    model.guidance_cost_fn = make_cost_fn(phi_idx, psi_idx, chirality_checker, EYE_MOUTH_WEIGHT)
-    model.guidance_num_steps = params["euler_steps"]
-    model.guidance_inner_steps = params["inner_steps"]
-    model.guidance_gamma = make_gamma_fn(params["gamma_hi"], params["gamma_lo_slope"], params["gamma_threshold"])
-    model.guidance_lr = params["lr"]
-    model.guidance_w_terminal = params["w_terminal"]
-    model.guidance_w_vf = params["w_vf"]
-    model.guidance_w_control = params["w_control"]
-    model.guidance_init_control = params["init_control"]
+    terminal_cost = make_cost_fn(phi_idx, psi_idx, chirality_checker, EYE_MOUTH_WEIGHT)
+    gamma_fn = make_gamma_fn(params["gamma_hi"], params["gamma_lo_slope"], params["gamma_threshold"])
 
     torch.manual_seed(SEED)
-    z = model.prior.sample(EVAL_BATCH, num_atoms, device=device)
 
     t0 = time.time()
     result = dict(params)
     result["eye_mouth_weight"] = EYE_MOUTH_WEIGHT
     try:
-        with torch.no_grad():
-            x = model._integrate_guided(model.net, z, encodings=None)
+        x, _, _ = generate_proposal_guided_euler(
+            model, EVAL_BATCH, num_atoms,
+            lambda x1, t: params["w_terminal"] * terminal_cost(x1, t),
+            gamma=gamma_fn, alpha=params["lr"], lam=params["w_control"], beta=params["w_vf"],
+            n_inner=params["inner_steps"], n_steps=params["euler_steps"],
+            device=device, track_density=False,
+        )
+        x = x.detach()
 
         x_phys = destandardize_coords(x.cpu(), eval_ctx.normalization_std)
         flip_mask = chirality_checker.flip_mask(x_phys)
@@ -330,7 +315,7 @@ def main() -> None:
         elapsed_min = (time.time() - start_time) / 60
         print(
             f"[{elapsed_min:6.1f} min] trial {trial_idx}: steps={params['euler_steps']} inner={params['inner_steps']} "
-            f"init={params['init_control']} lr={params['lr']:.4g} w_term={params['w_terminal']:.3g} -> {status}",
+            f"lr={params['lr']:.4g} w_term={params['w_terminal']:.3g} -> {status}",
             flush=True,
         )
 

@@ -2,52 +2,19 @@
 chosen objective. Three independent switches at the top control everything:
 
     GIF_OBJECTIVE: "pos_phi", "phi_target", "phi_psi_target", "smiley",
-        "smiley_reference", or "unguided" (no guidance at all -- the
-        no-guidance baseline, alpha=0/n_inner=0).
+        "smiley_reference", or "unguided" (no-guidance baseline).
     GIF_ZOOM: "full" (the whole [-pi,pi] x [-pi,pi] torus) or "zoom" (a
-        window around the objective's own target region -- pos_phi has no
-        bounded target region, so it's always full regardless).
-    GIF_BACKGROUND: "none" (plain), "density" (a quick fresh unguided Euler
-        pass's phi/psi density, hist2d/LogNorm/viridis, same style as
-        plot_ramachandran.py -- shows how guided samples redistribute
-        relative to where the model naturally puts mass; meaningless for
-        GIF_OBJECTIVE="unguided", since the foreground already is that
-        density) or "cost" (a static heatmap of the cost function's own
-        values over the grid -- only defined for objectives with a
-        time-independent closed-form cost: pos_phi, phi_target,
-        phi_psi_target, smiley; not available for smiley_reference, whose
-        cost depends on t, or unguided, which has none).
+        window around the objective's own target region; "pos_phi" has no
+        bounded target region, so it's always full).
+    GIF_BACKGROUND: "none", "density" (a quick fresh unguided Euler pass's
+        phi/psi density, for comparison against where guidance redistributes
+        mass), or "cost" (a static heatmap of the cost function's values;
+        only defined for time-independent costs, not "smiley_reference" or
+        "unguided").
 
-Replaces gif_guided_trajectory.py (old: smiley-only, zoomed, cost-landscape
-background), gif_guided_trajectory_full_space.py (smiley/phi_target/pos_phi/
-unguided, full-space, density background), and gif_guided_trajectory_simple.py
-(phi_psi_target/smiley/smiley_reference, full-space, no background) -- three
-scripts whose only real differences were exactly these three axes, now one
-script with three parameters.
-
-Also standardizes on generate_proposal_guided_euler/make_guided_euler_step
-(euler_density_integrator.py) as the integration engine for EVERY objective,
-including the ones the old full-space/zoomed scripts drove by hand-reimplementing
-FlowMatchingModule._integrate_guided's loop -- confirmed functionally
-equivalent earlier this session (same seed/params -> same results to ~1e-3).
-Two things that reimplementation supported and this does not: GUIDANCE_OPTIMIZER
-="adam" (only "gd"-style normalized-gradient inner steps here) and
-GUIDANCE_INIT_CONTROL="causal_zero" (the control always resets to zero each
-step here, never carried over) -- both match plot_guided_euler_ramachandran.py's
-current active settings ("gd" / "zero"), so this is a simplification, not a
-behavior change, for the configs actually in use.
-
-At every recorded step, this plots the phi/psi of the actual running state
-``x_t`` right after that step (what ``make_guided_euler_step`` returns) --
-NOT the old full-space scripts' forward-looking *free endpoint estimate*
-``x1_pred = cxt + (1-t)*v(cxt,t)`` (the same quantity the cost function
-itself is evaluated on internally, which "sees" a cleaner picture of where
-guidance is steering the sample than the still-noisy running state does,
-especially early on) -- matching the "simple" family's convention instead,
-since ``make_guided_euler_step`` doesn't expose that intermediate quantity.
-One upside of this simplification: the last recorded frame IS the true final
-sample already (t=1 exactly), so unlike the old scripts, no special-case
-replacement of a stale forward-looking last frame is needed.
+Plots the phi/psi of the running state ``x_t`` right after each step (what
+``make_guided_euler_step`` returns), so the last recorded frame is the true
+final sample (t=1 exactly).
 
 Hyperparameters (EULER_STEPS, GUIDANCE_GAMMA, GUIDANCE_LR, GUIDANCE_W_TERMINAL,
 etc.) are imported from plot_guided_euler_ramachandran.py so this stays in
@@ -110,8 +77,7 @@ GIF_OBJECTIVE = "phi_psi_target"  # "pos_phi", "phi_target", "phi_psi_target", "
 GIF_ZOOM = "full"  # "full" or "zoom"
 GIF_BACKGROUND = "density"  # "none", "density", or "cost"
 
-NUM_SAMPLES = 200  # trimmed for GPU headroom while other jobs share this GPU -- bump to 1000+ for a
-# cleaner point cloud with GIF_BACKGROUND="density"/"smiley" (no drawn target) once the GPU is free
+NUM_SAMPLES = 200  # bump to 1000+ for a cleaner point cloud when GPU headroom allows
 NUM_BACKGROUND_SAMPLES = 2000  # only used for GIF_BACKGROUND="density"
 SEED = 42
 NUM_FRAMES = 60  # subsampled from EULER_STEPS
@@ -313,8 +279,6 @@ def main() -> None:
           f"({NUM_SAMPLES} samples), recording {len(record_steps)} frames...")
     for k in range(EULER_STEPS):
         t = torch.as_tensor(k * dt, device=device, dtype=x.dtype)
-        # Records the running state x_next itself, not a forward-looking free
-        # endpoint estimate -- see module docstring.
         x = step(t, x).detach()
         if k in record_steps:
             phi, psi = phi_psi_of(x, NUM_SAMPLES)

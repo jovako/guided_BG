@@ -1,31 +1,16 @@
 """Run SNIS (self-normalized importance sampling) on the current-hparams
-pool, restricted to samples that are both `valid` (orientation-preserving,
-so their exact density is trustworthy) and `in_smiley_mask` (actually inside
-the constraint region, i.e. the zero-cost area of the face -- outside it the
-combined target energy is a soft penalty, not the true energy, so those
-points shouldn't be resampled as if they were valid draws from the
-constrained equilibrium).
+pool, restricted to samples that are both `valid` (orientation-preserving)
+and `in_smiley_mask` (inside the constraint region).
 
 Sibling of run_snis_on_pool.py, pointed at the pool prepared by
-prepare_snis_target_energy_current_hparams.py. In addition to that script's
-diagnostics (logw stats, ESS, weight concentration, resampling stats), this
-reports the same summary statistics (energy_md, phi, psi) computed two ways
-so the effect of the SNIS correction is visible directly:
+prepare_snis_target_energy_current_hparams.py. Additionally reports summary
+statistics (energy_md, phi, psi) two ways to make the SNIS correction's
+effect visible: "without SNIS" (plain unweighted mean/std over the subset)
+vs. "with SNIS" (importance-weighted using softmax(logw)).
 
-  - "without SNIS": plain unweighted mean/std over the raw valid & in-smiley
-    subset -- i.e. treating the guided proposal's samples as if they were
-    already equilibrium draws (they aren't, since the guided proposal's
-    density differs from the true constrained density).
-  - "with SNIS": importance-weighted mean/std using softmax(logw) as weights
-    (the same weights used for resampling), which corrects for that density
-    mismatch.
-
-Uses the same convention as snis_sampler.py: `logw = E_source - E_target`,
-here `E_source = neg_logq` (the guided proposal's own -log q, already exact
-since we restricted to valid samples) and `E_target = energy_combined`
-(energy_md + smiley_cost, from prepare_snis_target_energy_current_hparams.py)
--- multinomial resampling via the same `resampling_idx` helper the real
-SNISSampler uses.
+`logw = E_source - E_target` (snis_sampler.py's convention), with
+`E_source = neg_logq` and `E_target = energy_combined`; multinomial
+resampling via `resampling_idx`.
 
 Run with:
     uv run python tests/guidance/sampling/run_snis_on_pool_current_hparams.py

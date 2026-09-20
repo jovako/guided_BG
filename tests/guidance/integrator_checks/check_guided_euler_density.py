@@ -73,7 +73,7 @@ def main() -> None:
     chirality_checker = ChiralitySignChecker(eval_ctx.topology, eval_ctx.true_data.samples[:1])
 
     def terminal_cost(x1_flat: torch.Tensor) -> torch.Tensor:
-        # Single-sample convention (see make_guided_field): x1_flat is (d,), not batched.
+        # single-sample: x1_flat is (d,), not batched
         x1 = x1_flat.view(1, -1, 3)
         with torch.no_grad():
             flip_mask = chirality_checker.flip_mask(x1)

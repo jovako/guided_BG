@@ -2,28 +2,12 @@
 samples (smiley objective) and saves each chunk to disk as it completes, to
 build a pool for SNIS reweighting later.
 
-Config is the 66%-valid (42/64) point found in this session:
-    gamma_hi=1.91, gamma_lo_slope=4.7 (linear rise), gamma_threshold=0.408,
-    gamma_decay_threshold=0.805, gamma_decay_slope_mag=7.18, alpha=0.08863,
-    w_terminal=22.4, n_steps=250, lam=0, beta=0.
-BATCH=128 was chosen over the default 64 for a small (~2.4%) throughput gain
-from amortized per-step overhead (measured empirically: batch=128 fits in
-~9GB of this GPU's 12GB, comfortable headroom below the ~160-176 OOM point) --
-NOT because larger batch is dramatically faster: per-step time scales almost
-linearly with batch here (the "sum trick" in euler_density_integrator.py only
-keeps the *number* of backward calls independent of batch, not their FLOPs),
-so total samples/hour stays roughly flat regardless of batch size.
+Each chunk needs the full exact-density Jacobian pass, so CHUNKS is sized to
+fit a multi-hour budget. Resumable: chunks already saved on disk are skipped.
 
-Each chunk needs the full exact-density Jacobian pass (~17.1s/step at
-batch=128, i.e. ~71 min/chunk), so CHUNKS=17 is sized to fit a ~20h budget
-(17 * 71min ~= 20.2h). Resumable: chunks already saved on disk are skipped,
-so re-running after an interruption picks up where it left off.
-
-IMPORTANT: this only saves x / neg_logq / valid / the ORIGINAL (unconstrained)
-target energy -- NOT SNIS weights. SNIS needs a target energy that combines
-the original energy with the guidance cost function (otherwise reweighting
-just undoes the guidance and recovers the unconstrained equilibrium, not the
-smiley-constrained one) -- that combination is intentionally deferred to a
+Only saves x / neg_logq / valid / the original (unconstrained) target energy,
+not SNIS weights -- combining the energy with the guidance cost function
+(needed so reweighting doesn't just undo the guidance) is deferred to a
 later script; this one only builds the raw sample pool.
 
 Run with:

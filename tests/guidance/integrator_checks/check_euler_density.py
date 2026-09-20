@@ -1,9 +1,4 @@
-"""Step 1 of the exact-density validation protocol for the guided fixed-step
-Euler integrator: alpha=0 must match stock dopri5 log q.
-
-See check_rk4_density.py for the identical rationale, applied here to
-euler_density_integrator.py instead. Euler is 1st-order (vs RK4's 4th), so
-expect needing more steps to converge -- but each step is ~4x cheaper.
+"""Validate the guided fixed-step Euler integrator: alpha=0 must match stock dopri5 log q.
 
 Run with:
     uv run python tests/guidance/integrator_checks/check_euler_density.py

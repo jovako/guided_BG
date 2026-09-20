@@ -2,24 +2,11 @@
 
 Same idea as rejection_baseline_positive_phi.py, generalized to the smiley
 region: a sample is accepted if its (phi, psi) falls inside the face circle
-and outside every eye/mouth exclusion circle -- i.e. exactly the
-"frac_in_face_circle and not frac_in_eye_or_mouth" success condition used by
-the guided smiley script (plot_guided_euler_ramachandran.py), just applied as
-a hard accept/reject filter on unguided dopri5 samples instead of as a soft
-guidance cost.
+and outside every eye/mouth exclusion circle, applied as a hard accept/reject
+filter on unguided dopri5 samples (vs. the guided script's soft cost).
 
-The smiley region is a small box (phi in PHI_TARGET, psi in PSI_TARGET)
-overlapping only part of the model's natural density, further restricted to a
-circle minus several small holes -- so expect a much lower acceptance rate
-than the positive-phi baseline (that was ~50%; this could be well under 5%).
-MAX_BATCHES is set high accordingly since each batch is cheap regardless of
-how many samples in it are accepted; watch the running acceptance rate printed
-per batch and lower TARGET_ACCEPTED (or raise MAX_BATCHES) if it's too rare.
-
-Same Wasserstein/chirality conventions as rejection_baseline_positive_phi.py:
-accepted samples' coordinates + energies are saved (not just summary stats),
-since torus-w2/energy-w2 against a guided run need the actual per-sample
-values from both sides.
+Accepted samples' coordinates + energies are saved (not just summary stats),
+since torus-w2/energy-w2 against a guided run need per-sample values.
 
 Run with:
     uv run python tests/guidance/rejection_baselines/rejection_baseline_smiley.py
@@ -48,15 +35,14 @@ from transferable_samplers.utils.standardization import destandardize_coords
 
 TARGET_ACCEPTED = 500
 BATCH_SIZE = 512
-MAX_BATCHES = 200  # smiley region is much rarer than positive-phi; batches are cheap so cap generously
+MAX_BATCHES = 200
 SEED = 42
 SEQUENCE = "Ace-A-Nme"
 OUT_DIR = "tests/guidance/out"
 PREFIX = "rejection_smiley"
 SAMPLES_PATH = f"{OUT_DIR}/{PREFIX}_samples.pt"
 
-# Same box target and derived smiley geometry as plot_guided_euler_ramachandran.py
-# (kept in sync by hand -- these constants must match that file's active values).
+# Same box target and derived smiley geometry as plot_guided_euler_ramachandran.py.
 PHI_TARGET = (-2.0, -1.0)
 PSI_TARGET = (-0.5, 0.5)
 _BOX_CENTER = ((PHI_TARGET[0] + PHI_TARGET[1]) / 2, (PSI_TARGET[0] + PSI_TARGET[1]) / 2)
@@ -124,10 +110,6 @@ def main() -> None:
     psi_idx = get_dihedral_atom_indices(eval_ctx.topology, kind="psi")
     chirality_checker = ChiralitySignChecker(eval_ctx.topology, eval_ctx.true_data.samples[:1])
 
-    # Per the dopri5 tolerance sweep (sweep_dopri5_tolerance.py), atol=rtol=3e-3
-    # already matches/beats the codebase's tight 1e-5 default in energy-w2 to
-    # the true reference while needing far fewer NFEs (~50 vs ~140) -- much
-    # cheaper for the many batches rejection sampling needs here.
     model.atol = 3e-3
     model.rtol = 3e-3
 

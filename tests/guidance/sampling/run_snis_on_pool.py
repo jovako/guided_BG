@@ -1,19 +1,13 @@
 """Run SNIS (self-normalized importance sampling) on the density-sampling
-pool, restricted to samples that are both `valid` (orientation-preserving,
-so their exact density is trustworthy) and `in_smiley_mask` (actually inside
-the constraint region -- outside it the combined target energy is a soft
-penalty, not the true energy, so those points shouldn't be resampled as if
-they were valid draws from the constrained equilibrium).
+pool, restricted to samples that are both `valid` (orientation-preserving)
+and `in_smiley_mask` (inside the constraint region, where the combined
+target energy is the true energy rather than a soft penalty).
 
-Uses the same convention as snis_sampler.py: `logw = E_source - E_target`,
-here `E_source = neg_logq` (the guided proposal's own -log q, already exact
-since we restricted to valid samples) and `E_target = energy_combined`
-(energy_md + smiley_cost, from prepare_snis_target_energy.py) -- multinomial
-resampling via the same `resampling_idx` helper the real SNISSampler uses.
+`logw = E_source - E_target` (snis_sampler.py's convention), with
+`E_source = neg_logq` and `E_target = energy_combined` (from
+prepare_snis_target_energy.py); multinomial resampling via `resampling_idx`.
 
-Reports effective sample size (ESS) and weight concentration as a check that
-the guided proposal isn't so different in shape from the true constrained
-distribution that a handful of samples dominate the resampled set.
+Reports effective sample size (ESS) and weight concentration.
 
 Run with:
     uv run python tests/guidance/sampling/run_snis_on_pool.py

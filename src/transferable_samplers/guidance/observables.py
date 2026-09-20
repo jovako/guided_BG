@@ -1,18 +1,13 @@
 """Differentiable collective-variable observables for guided sampling.
 
-The evaluation-side phi/psi code (``evaluation/plots/plot_ramachandran.py``,
-``evaluation/metrics/wasserstein_distances.py``, ``data/preprocessing/tica.py``)
-computes dihedral angles via ``mdtraj``, which operates on unbatched numpy
-trajectories and is not differentiable. Guided sampling needs the gradient of
-an observable with respect to the (batched) atom positions, so this module
-reimplements the dihedral angle as a pure-torch, batched, differentiable
-function instead.
+The evaluation-side phi/psi code operates on unbatched numpy trajectories via
+``mdtraj`` and isn't differentiable. Guided sampling needs the gradient of an
+observable w.r.t. (batched) atom positions, so this reimplements the dihedral
+angle as a pure-torch, batched, differentiable function.
 
-The atom *indices* that define a dihedral (e.g. which four atoms form phi for
-a given residue) only depend on the topology's bond graph, not on coordinates,
-so those are still looked up once via ``mdtraj`` (see
-``get_dihedral_atom_indices``) and then baked into a guidance cost closure --
-no ``mdtraj`` calls happen inside the sampling loop.
+Atom *indices* for a dihedral only depend on the topology's bond graph, so
+those are still looked up once via ``mdtraj`` (``get_dihedral_atom_indices``)
+and baked into a guidance cost closure -- no ``mdtraj`` calls in the sampling loop.
 """
 
 from __future__ import annotations
@@ -31,21 +26,13 @@ _COMPUTE_FN = {
 
 
 def get_dihedral_atom_indices(topology: md.Topology, kind: Literal["phi", "psi", "omega"] = "phi") -> np.ndarray:
-    """Return the atom index quadruples ``mdtraj`` uses for a dihedral kind on this topology.
+    """Atom index quadruples ``mdtraj`` uses for a dihedral kind on this topology.
 
-    Coordinates don't affect which atoms form each dihedral -- ``mdtraj``
-    derives the quadruples purely from the topology's bond graph, so a dummy
-    single-frame trajectory (zeros) is built just to satisfy its API; only the
-    returned indices are used, never the (meaningless) angle values.
-
-    Args:
-        topology: mdtraj topology (e.g. ``datamodule.topology``).
-        kind: One of "phi", "psi", "omega".
+    Uses a dummy single-frame trajectory (zeros) to satisfy ``mdtraj``'s API;
+    only the returned indices matter, not the (meaningless) angle values.
 
     Returns:
-        Atom index quadruples, shape ``(num_dihedrals, 4)``. For phi this is
-        ``[C(i-1), N(i), CA(i), C(i)]`` per residue, matching the atom order
-        expected by ``dihedrals()``.
+        Atom index quadruples, shape ``(num_dihedrals, 4)``.
     """
     dummy_traj = md.Trajectory(np.zeros((1, topology.n_atoms, 3)), topology=topology)
     indices, _ = _COMPUTE_FN[kind](dummy_traj)
@@ -56,8 +43,7 @@ def dihedral_angle(p0: torch.Tensor, p1: torch.Tensor, p2: torch.Tensor, p3: tor
     """Batched, differentiable dihedral angle in radians, ``mdtraj``-compatible sign convention.
 
     Args:
-        p0, p1, p2, p3: Positions of the four atoms defining the dihedral,
-            each ``(..., 3)``. For phi: p0=C(i-1), p1=N(i), p2=CA(i), p3=C(i).
+        p0, p1, p2, p3: Positions of the four atoms defining the dihedral, each ``(..., 3)``.
 
     Returns:
         Dihedral angle(s) in ``(-pi, pi]``, shape ``(...,)``.
@@ -82,8 +68,7 @@ def dihedrals(x: torch.Tensor, atom_indices: torch.Tensor | np.ndarray) -> torch
 
     Args:
         x: Positions ``(batch, atoms, 3)``.
-        atom_indices: Atom index quadruples ``(num_dihedrals, 4)``, e.g. from
-            ``get_dihedral_atom_indices``.
+        atom_indices: Atom index quadruples ``(num_dihedrals, 4)``.
 
     Returns:
         Dihedral angles ``(batch, num_dihedrals)`` in radians.

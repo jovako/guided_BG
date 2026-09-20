@@ -1,15 +1,9 @@
-"""Find one UNGUIDED velocity vector v_t at t=0.9 whose linear endpoint
-extrapolation x1_hat = x_t + 0.1*v_t lands approximately at the smiley's
-FACE_CENTER -- i.e. the same "does this step's implied endpoint land near the
-target" quantity make_guided_euler_step's inner objective evaluates, but here
-read off a plain (alpha=0, n_inner=0) unguided trajectory, not a guided one.
+"""Find one unguided velocity vector v_t at t=0.9 whose linear endpoint
+extrapolation x1_hat = x_t + 0.1*v_t lands near the smiley's FACE_CENTER.
 
-Draws a batch of prior samples, integrates them unguided (fixed-step Euler,
-matching this session's n_steps=250 convention) up to t=0.9 (step 225/250),
-evaluates the network's own velocity there once, and picks whichever sample's
-x1_hat is closest (periodic torus_distance) to FACE_CENTER. Cheap: no
-guidance inner loop, no exact-density Jacobian, just BATCH forward passes per
-step -- safe to run alongside the 9GB density-sampling job.
+Draws a batch of prior samples, integrates them unguided (fixed-step Euler)
+up to t=0.9, evaluates the network's velocity there once, and picks whichever
+sample's x1_hat is closest (periodic torus_distance) to FACE_CENTER.
 
 Run with:
     uv run python tests/guidance/integrator_checks/find_velocity_toward_smiley_center.py
@@ -33,7 +27,7 @@ from plot_guided_euler_ramachandran import FACE_CENTER, FACE_RADIUS, OUT_DIR, SE
 
 BATCH = 256
 SEED = 42
-EULER_STEPS = 250  # matches this session's convention -- t=0.9 falls exactly on a step boundary
+EULER_STEPS = 250  # t=0.9 falls exactly on a step boundary
 T_TARGET = 0.9
 STEPS_TO_T = round(T_TARGET * EULER_STEPS)  # 225
 SAVE_PATH = f"{OUT_DIR}/velocity_near_smiley_center_t0.9.pt"
@@ -53,8 +47,7 @@ def main() -> None:
     net.requires_grad_(False)
     dt = 1.0 / EULER_STEPS
 
-    # Plain unguided step: n_inner=0 skips the guidance inner loop entirely
-    # (no backward pass at all), matching check_unguided_consistency's convention.
+    # n_inner=0 skips the guidance inner loop entirely -- plain unguided step.
     step = make_guided_euler_step(
         net, None, terminal_cost=lambda x1, t: (x1 * 0.0).sum(),
         dt=dt, gamma=0.0, alpha=0.0, n_inner=0, use_score_deviation=False,

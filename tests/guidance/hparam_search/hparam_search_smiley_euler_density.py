@@ -19,9 +19,8 @@ frac_in_face >= FRAC_IN_FACE_TARGET), but using
     - n_inner=1 (per "keep inner steps to 1 if possible")
     - the inner loop is a *normalized* functional gradient step, and the
       step function is ``x_next = cxt + dt*v_control`` where
-      ``cxt = x + gamma*u`` -- matching ``_integrate_guided``'s exact
-      recursion (the control's shift is teleported directly into the
-      trajectory, not merely used to compute a velocity). See
+      ``cxt = x + gamma*u`` -- the control's shift is teleported directly
+      into the trajectory, not merely used to compute a velocity. See
       make_guided_euler_step's docstring in euler_density_integrator.py.
     - n_steps=250 (the minimum step count found orientation-safe for the
       UNGUIDED case; the guided case turned out to fail orientation much
