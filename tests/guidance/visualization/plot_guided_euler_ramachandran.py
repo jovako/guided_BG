@@ -415,7 +415,6 @@ def main() -> None:
         cost_true = terminal_cost_fn(eval_ctx.true_data.samples)
 
     e_generated_augmented = e_generated + AUGMENTED_ENERGY_COST_SCALE * cost_generated
-    e_true_augmented = eval_ctx.true_data.E_target + AUGMENTED_ENERGY_COST_SCALE * cost_true
 
     phi_generated = dihedrals(samples_physical, phi_idx).squeeze(-1)
     psi_generated = dihedrals(samples_physical, psi_idx).squeeze(-1)
@@ -435,7 +434,6 @@ def main() -> None:
     metrics = {
         f"{PREFIX}/mean-energy": e_generated.mean().item(),
         f"{PREFIX}/mean-augmented-energy": e_generated_augmented.mean().item(),
-        f"{PREFIX}/mean-augmented-energy-true-MD": e_true_augmented.mean().item(),
         f"{PREFIX}/correct-chirality-rate": 1 - flip_mask.float().mean().item(),
         f"{PREFIX}/frac-in-face-circle": in_face_circle.float().mean().item(),
         f"{PREFIX}/frac-in-eye-or-mouth": in_eye_or_mouth.float().mean().item(),
