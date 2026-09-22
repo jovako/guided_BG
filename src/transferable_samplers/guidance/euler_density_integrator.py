@@ -110,10 +110,8 @@ def make_guided_euler_step(
     def step(t: Tensor, x: Tensor) -> Tensor:
         gamma_t = gamma(t) if callable(gamma) else torch.as_tensor(gamma, dtype=x.dtype, device=x.device)
         f0 = f_theta(t, x) if (use_score_deviation and beta != 0.0) else torch.zeros((), dtype=x.dtype, device=x.device)
-        u = torch.zeros_like(x)
+        u = torch.zeros_like(x).requires_grad_(True)
         for i in range(n_inner):
-            if i == 0:
-                u.requires_grad_(True)
             total_obj = inner_objective_sum(u, t, x, f0, gamma_t)
             (g,) = torch.autograd.grad(total_obj, u, create_graph=True)
             g_norm = g.norm(dim=-1, keepdim=True)  # per-sample norm
