@@ -14,9 +14,13 @@ OBJECTIVE below to switch the terminal cost:
       SMILEY_REFERENCE_T_SWITCH, then reverts to "smiley".
 
 Also reports the Wasserstein distance to the matching unguided
-rejection-sampling baseline (rejection_baseline_*.py's saved samples), which
-is the more direct "is guidance good" comparison than energy-w2/torus-w2 to
-the true trajectory (guidance deliberately biases away from that).
+rejection-sampling baseline (rejection_baseline_*.py's saved samples) --
+guidance deliberately biases away from the true (unguided) trajectory, so
+that's the more direct "is guidance good" comparison, not energy-w2/torus-w2
+against the true trajectory directly. Also reports an "augmented" energy
+(target_energy + AUGMENTED_ENERGY_COST_SCALE * cost) for the generated
+samples and, separately, for the true MD data -- diagnostic means only, not
+compared to each other via Wasserstein.
 
 Run with:
     uv run python tests/guidance/visualization/plot_guided_euler_ramachandran.py
@@ -83,6 +87,15 @@ GUIDANCE_LR = 2.e-3
 GUIDANCE_W_TERMINAL = 1.0
 GUIDANCE_W_VF = 0.
 GUIDANCE_W_CONTROL = 0.0
+
+# Weight on the cost function when reporting an "augmented" energy
+# (target_energy + AUGMENTED_ENERGY_COST_SCALE * cost) for diagnostics --
+# unrelated to GUIDANCE_W_TERMINAL, which weights the cost inside the
+# sampler's own control objective. Large enough that samples far from the
+# objective's zero-cost region get near-zero probability under the implied
+# exp(-augmented_energy) tilted distribution.
+AUGMENTED_ENERGY_COST_SCALE = 20.0
+
 SEQUENCE = "Ace-A-Nme"
 OUT_DIR = "tests/guidance/out"
 PREFIX = f"euler_guided_{EULER_STEPS}_{OBJECTIVE}"
@@ -186,6 +199,7 @@ def guidance_hyperparams() -> dict:
         "GUIDANCE_W_TERMINAL": GUIDANCE_W_TERMINAL,
         "GUIDANCE_W_VF": GUIDANCE_W_VF,
         "GUIDANCE_W_CONTROL": GUIDANCE_W_CONTROL,
+        "AUGMENTED_ENERGY_COST_SCALE": AUGMENTED_ENERGY_COST_SCALE,
     }
 
 
@@ -338,6 +352,10 @@ def main() -> None:
         "smiley_reference": smiley_reference_cost_fn,
         "smiley": smiley_cost_fn,
     }[OBJECTIVE]
+    # Single-sample-batched (x1) -> cost convention for post-hoc metrics below;
+    # smiley_reference needs t, but at the final sample (t=1) it's already past
+    # SMILEY_REFERENCE_T_SWITCH and reduces to plain smiley_cost_fn.
+    terminal_cost_fn = smiley_cost_fn if OBJECTIVE == "smiley_reference" else guidance_cost_fn
 
     torch.manual_seed(SEED)
     samples = []
@@ -393,6 +411,11 @@ def main() -> None:
 
     with torch.no_grad():
         e_generated = eval_ctx.target_energy.energy(samples)
+        cost_generated = terminal_cost_fn(samples_physical)
+        cost_true = terminal_cost_fn(eval_ctx.true_data.samples)
+
+    e_generated_augmented = e_generated + AUGMENTED_ENERGY_COST_SCALE * cost_generated
+    e_true_augmented = eval_ctx.true_data.E_target + AUGMENTED_ENERGY_COST_SCALE * cost_true
 
     phi_generated = dihedrals(samples_physical, phi_idx).squeeze(-1)
     psi_generated = dihedrals(samples_physical, psi_idx).squeeze(-1)
@@ -411,6 +434,8 @@ def main() -> None:
 
     metrics = {
         f"{PREFIX}/mean-energy": e_generated.mean().item(),
+        f"{PREFIX}/mean-augmented-energy": e_generated_augmented.mean().item(),
+        f"{PREFIX}/mean-augmented-energy-true-MD": e_true_augmented.mean().item(),
         f"{PREFIX}/correct-chirality-rate": 1 - flip_mask.float().mean().item(),
         f"{PREFIX}/frac-in-face-circle": in_face_circle.float().mean().item(),
         f"{PREFIX}/frac-in-eye-or-mouth": in_eye_or_mouth.float().mean().item(),
@@ -430,9 +455,6 @@ def main() -> None:
         metrics[f"{PREFIX}/mean-energy-in-target-bin"] = (
             e_generated[in_target_bin].mean().item() if in_target_bin.any() else float("nan")
         )
-    metrics.update(energy_wasserstein(pred_energy=e_generated, true_energy=eval_ctx.true_data.E_target, prefix=PREFIX))
-    metrics.update(torus_wasserstein(eval_ctx.true_data.samples, samples_physical, eval_ctx.topology, prefix=PREFIX))
-
     if os.path.exists(REJECTION_SAMPLES_PATH):
         rejection_data = torch.load(REJECTION_SAMPLES_PATH, weights_only=False)
         rejection_samples_physical = rejection_data["samples_physical"]
