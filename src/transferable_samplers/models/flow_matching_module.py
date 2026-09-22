@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import copy
-from collections.abc import Callable
 from functools import partial
 from typing import Any
 
@@ -33,47 +32,6 @@ class FlowMatchingModule(BaseLightningModule):
         dlogp_tol_scale: Scaling factor for the log-determinant tolerance in the ODE.
         atol: Absolute tolerance for the ODE solver.
         rtol: Relative tolerance for the ODE solver.
-        use_guidance: If True, ``generate_proposal`` replaces the adaptive dopri5
-            solver with a fixed-step Euler integrator that, at every step, optimizes
-            a control vector to minimize ``guidance_cost_fn`` evaluated on the free
-            endpoint estimate. Trajectories only -- dlogp is not tracked for the
-            guided process (see ``generate_proposal``).
-        guidance_num_steps: Number of fixed Euler steps used when ``use_guidance``.
-        guidance_inner_steps: Number of Adam steps used to optimize the control
-            vector at each Euler step.
-        guidance_gamma: Weight of the control vector when combined with the state
-            (``x_t + guidance_gamma * u_t``). Either a constant, or a callable
-            of the scalar step time ``t`` (e.g. ``lambda t: 5.0 if t > 0.6 else 2.0 * t``)
-            for a time-dependent schedule, evaluated once per Euler step.
-        guidance_lr: Learning rate / step size for the control vector optimizer
-            (see ``guidance_optimizer``).
-        guidance_optimizer: How the control vector ``u_t`` is updated at each inner
-            step. ``"adam"`` (default): a fresh ``torch.optim.Adam`` per Euler step.
-            Note bias correction makes Adam's *first* step exactly
-            ``lr * sign(gradient)`` regardless of gradient magnitude (the two
-            ``(1-beta)`` bias-correction factors cancel exactly at t=1), so with
-            the common ``guidance_inner_steps=1`` setting, "Adam" here is really
-            just a fixed-size step in the gradient's sign direction, not a
-            magnitude-aware update. ``"gd"``: plain gradient descent,
-            ``u_t -= lr * gradient`` -- uses the actual gradient magnitude, no
-            optimizer state.
-        guidance_w_terminal: Weight on the terminal cost (``guidance_cost_fn``).
-        guidance_w_vf: Weight penalizing the guided velocity ``net(t, x_t + gamma*u_t)``
-            for deviating from the unguided velocity ``net(t, x_t)``. 0 disables this
-            term (and skips the extra network call it would need).
-        guidance_w_control: Weight penalizing the control vector's magnitude
-            (``gamma**2 * ||u_t||^2``). 0 disables this term.
-        guidance_init_control: How the control vector ``u_t`` is initialized at
-            each Euler step, matching the reference NDTM ``initialize_ut``
-            schemes. ``"zero"`` (default): reset to zero every step. ``"causal_zero"``:
-            zero only at the first step, then carried over from the previous
-            step's optimized value (detached) for every subsequent step.
-        guidance_cost_fn: Callable mapping predicted endpoint positions
-            ``(batch, atoms, dims)`` to a per-sample terminal cost ``(batch,)`` to
-            minimize. Fully general -- e.g. a squared distance to a target
-            observable, or an asymmetric penalty like "only penalize negative
-            phi" (see ``transferable_samplers.guidance`` for differentiable
-            observables such as dihedral angles, and cost-shaping helpers).
     """
 
     def __init__(
@@ -90,17 +48,6 @@ class FlowMatchingModule(BaseLightningModule):
         dlogp_tol_scale: float = 1.0,
         atol: float = 1e-5,
         rtol: float = 1e-5,
-        use_guidance: bool = False,
-        guidance_num_steps: int = 100,
-        guidance_inner_steps: int = 2,
-        guidance_gamma: float | Callable[[torch.Tensor], float] = 4.0,
-        guidance_lr: float = 1e-2,
-        guidance_optimizer: str = "adam",
-        guidance_w_terminal: float = 50.0,
-        guidance_w_vf: float = 0.0,
-        guidance_w_control: float = 0.0,
-        guidance_init_control: str = "zero",
-        guidance_cost_fn: Callable[[torch.Tensor], torch.Tensor] | None = None,
     ) -> None:
         super().__init__(
             net=net,
@@ -118,24 +65,6 @@ class FlowMatchingModule(BaseLightningModule):
         self.dlogp_tol_scale = dlogp_tol_scale
         self.atol = atol
         self.rtol = rtol
-
-        self.use_guidance = use_guidance
-        self.guidance_num_steps = guidance_num_steps
-        self.guidance_inner_steps = guidance_inner_steps
-        self.guidance_gamma = guidance_gamma
-        self.guidance_lr = guidance_lr
-        self.guidance_optimizer = guidance_optimizer
-        self.guidance_w_terminal = guidance_w_terminal
-        self.guidance_w_vf = guidance_w_vf
-        self.guidance_w_control = guidance_w_control
-        self.guidance_init_control = guidance_init_control
-        self.guidance_cost_fn = guidance_cost_fn
-        if self.use_guidance:
-            assert self.guidance_cost_fn is not None, "guidance_cost_fn must be set when use_guidance=True."
-        assert self.guidance_init_control in ("zero", "causal_zero"), (
-            f"Unknown guidance_init_control: {self.guidance_init_control!r}"
-        )
-        assert self.guidance_optimizer in ("adam", "gd"), f"Unknown guidance_optimizer: {self.guidance_optimizer!r}"
 
         # set runtime state
         self.nfe = 0
@@ -201,15 +130,6 @@ class FlowMatchingModule(BaseLightningModule):
 
         batched_cond = system_cond.for_batch(num_samples, self.device) if system_cond else None
         encodings = batched_cond.encodings if batched_cond else None
-
-        if self.use_guidance:
-            x_pred = self._integrate_guided(net, z, encodings=encodings)
-            logger.warning(
-                "use_guidance=True: dlogp is not tracked for the guided trajectory. "
-                "Returning NaN proposal energy -- do not use it for importance weighting."
-            )
-            neg_logq = torch.full((num_samples,), float("nan"), device=self.device)
-            return x_pred, neg_logq
 
         x_pred, dlogp = self._integrate(net, z, encodings=encodings, reverse=False)
 
@@ -294,106 +214,6 @@ class FlowMatchingModule(BaseLightningModule):
 
         # pyrefly: ignore [bad-return]
         return x, dlogp_out.view(-1)
-
-    def _guidance_terminal_cost(self, x1_flat: torch.Tensor, batch_size: int, num_atoms: int) -> torch.Tensor:
-        """Per-sample terminal cost from the user-supplied ``guidance_cost_fn``."""
-        x1 = x1_flat.reshape(batch_size, num_atoms, -1)
-        # pyrefly: ignore [not-callable]
-        return self.guidance_cost_fn(x1)
-
-    def _integrate_guided(
-        self,
-        net: torch.nn.Module,
-        x: torch.Tensor,
-        encodings: dict[str, torch.Tensor] | None = None,
-    ) -> torch.Tensor:
-        """Integrate the forward ODE (prior -> target) with per-step observable guidance.
-
-        Replaces the adaptive dopri5 solver with a fixed-step Euler integrator so a
-        control vector can be optimized at every step: it is fit with
-        ``guidance_inner_steps`` of Adam to minimize ``guidance_cost_fn`` evaluated
-        on the free endpoint estimate ``x1 = x_t + (1-t)*v(x_t,t)``, where the
-        control vector is combined additively as ``x_t + guidance_gamma * u_t``.
-        The Euler update for the step is then taken from that guided state.
-
-        Does not track dlogp -- see ``generate_proposal``.
-
-        Args:
-            net: Velocity field network.
-            x: Input tensor ``(batch, atoms, 3)``.
-            encodings: Optional conditioning encodings.
-
-        Returns:
-            Transformed samples ``(batch, atoms, 3)``.
-        """
-        batch_size = x.shape[0]
-        num_atoms = x.shape[1]
-
-        x = x.reshape(batch_size, -1)  # Ensure x is 2D
-
-        net_c = copy.deepcopy(net)
-        net_c.requires_grad_(False)
-        eval_fn = partial(net_c, encodings=encodings)
-
-        ts = torch.linspace(0.0, 1.0, self.guidance_num_steps + 1, device=x.device)
-        dt = ts[1] - ts[0]
-
-        xt = x
-        nfe = 0
-        u_t_carry = None
-        for i in range(self.guidance_num_steps):
-            t_i = ts[i]
-            gamma_t = self.guidance_gamma(t_i) if callable(self.guidance_gamma) else self.guidance_gamma
-
-            with torch.enable_grad():
-                xt_ = xt.detach()
-                if self.guidance_init_control == "causal_zero" and i > 0:
-                    u_t = u_t_carry.clone().requires_grad_(True)
-                else:
-                    u_t = torch.zeros_like(xt_, requires_grad=True)
-                optimizer = torch.optim.Adam([u_t], lr=self.guidance_lr) if self.guidance_optimizer == "adam" else None
-
-                vt_unguided = None
-                if self.guidance_w_vf > 0:
-                    vt_unguided = eval_fn(t_i, xt_).detach()
-                    nfe += 1
-
-                for _ in range(self.guidance_inner_steps):
-                    cxt = xt_ + gamma_t * u_t
-                    vt_control = eval_fn(t_i, cxt)
-                    x1_pred = cxt + (1.0 - t_i) * vt_control
-                    loss = self.guidance_w_terminal * self._guidance_terminal_cost(x1_pred, batch_size, num_atoms)
-
-                    if vt_unguided is not None:
-                        vf_cost = (vt_control - vt_unguided).pow(2).reshape(batch_size, -1).sum(dim=-1)
-                        loss = loss + self.guidance_w_vf * vf_cost
-                    if self.guidance_w_control > 0:
-                        control_cost = u_t.pow(2).reshape(batch_size, -1).sum(dim=-1)
-                        loss = loss + self.guidance_w_control * (gamma_t**2) * control_cost
-
-                    if optimizer is not None:
-                        optimizer.zero_grad()
-                        loss.sum().backward()
-                        optimizer.step()
-                    else:
-                        (grad,) = torch.autograd.grad(loss.sum(), u_t)
-                        grad_norm = grad.norm(dim=-1, keepdim=True)
-                        u_t = (u_t - self.guidance_lr * grad / (grad_norm + 1e-8)).detach().requires_grad_(True)
-                        #u_t = (u_t - self.guidance_lr * grad / (grad.abs() + 1e-8)).detach().requires_grad_(True)
-                    nfe += 1
-
-                u_t_carry = u_t.detach()
-                cxt = xt_ + gamma_t * u_t_carry
-                vt_control = eval_fn(t_i, cxt)
-                nfe += 1
-
-            xt = (cxt + dt * vt_control).detach()
-
-        logger.info(f"guided nfe: {nfe}")
-        self.nfe += nfe
-        self.num_integrations += 1
-
-        return xt.reshape(batch_size, num_atoms, -1)
 
     def _get_xt(
         self, x0: torch.Tensor, x1: torch.Tensor, t: torch.Tensor, mask: torch.Tensor | None = None
